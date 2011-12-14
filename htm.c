@@ -383,10 +383,10 @@ int Interface_score(Interface *interface,int predictive)
                     if (interface->input->state[0][ipos->vol] > den->sensitivity+dens->bias)
                     {
                         den->score+=1;
-                        if (interface->output->state[1][opos->vol] & IS_ACTIVE)
-                            den->score+=1; // synapses that can be and are predicted to be active get an extra boost
                     }
                 }
+                if (interface->output->state[1][opos->vol] & IS_ACTIVE)
+                    den->score+=1; // synapses that can be and are predicted to be active get an extra boost
             }
         }
 
