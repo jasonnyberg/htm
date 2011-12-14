@@ -5,18 +5,20 @@
 #include <GL/gl.h>
 #include <GL/glu.h>
 #include <GL/freeglut.h>
-//#include <countof.h>
 
 #define DENDRITE_CACHE 0x1000
-#define DENDRITES 8
+#define DENDRITES 6
 #define SYNAPSES 6
 
+#define SYNAPSE_THRESH 2
+#define DENDRITE_THRESH 2
 #define ACTIVE_THRESH 1
-#define DIST_THRESH 3
-#define INIT_PERMANENCE_MASK 0x7
+#define INIT_PERMANENCE_RANGE 20
 #define IS_ACTIVE 0x80
 #define WAS_ACTIVE 0x7f
 #define SYNAPSE_ADJUSTMENT 5
+#define MAX_PERMANENCE 120
+#define MIN_PERMANENCE -120
 
 
 #define MIN(x,y) ((x)<(y)?(x):(y))
@@ -56,19 +58,26 @@ Seed gseed;
 int show_cells=1;
 int show_dendrites=1;
 int show_map=0;
-int show_scores=1;
+int show_scores=0;
+int show_suppression=0;
 
 
 typedef struct
 {
-    unsigned char permanence;
+    char permanence;
     unsigned char sensitivity;
 } Synapse;
 
 typedef struct
 {
-    Synapse synapse[DENDRITES][SYNAPSES];
-    unsigned char bias[DENDRITES];
+    Synapse synapse[SYNAPSES];
+    unsigned char score;
+    unsigned char bias;
+} Dendrite;
+
+typedef struct
+{
+    Dendrite dendrite[DENDRITES];
 } Dendrites;
     
 typedef struct
@@ -158,8 +167,8 @@ int Interface_init(Interface *interface,StateMap *input,StateMap *output,int sen
     
     ZLOOP(i,output->size.vol) ZLOOP(d,DENDRITES) ZLOOP(s,SYNAPSES)
     {
-        interface->dendrites[i].synapse[d][s].permanence=LRAND(gseed)&INIT_PERMANENCE_MASK;
-        interface->dendrites[i].synapse[d][s].sensitivity=sensitivity?sensitivity:~(0xff>>(LRAND(gseed)&7)); // 2^n, n=1 through 8
+        interface->dendrites[i].dendrite[d].synapse[s].permanence=LRAND(gseed)%INIT_PERMANENCE_RANGE-(INIT_PERMANENCE_RANGE>>1);
+        interface->dendrites[i].dendrite[d].synapse[s].sensitivity=sensitivity?sensitivity:~(0xff>>(LRAND(gseed)&7)); // 2^n, n=1 through 8
     }
     return 0;
 }
@@ -171,7 +180,7 @@ int Interface_traverse(Interface *interface,Synapse_op op)
     Seed seed;
     D3 ipos,opos;
     fvec delta;
-    int dendrite,synapse,axis;
+    int d,s,axis;
     DendriteMap map;
     Synapse *syn;
     int i;
@@ -185,15 +194,15 @@ int Interface_traverse(Interface *interface,Synapse_op op)
     {
         // score synapses
         (void) DIM3V(opos.v,interface->output->size.v); // populate opos.vol
-        ZLOOP(dendrite,DENDRITES)
+        ZLOOP(d,DENDRITES)
         {
             ZLOOP(axis,3) ipos.v[axis]=(int) (opos.v[axis]*delta.v[axis]);
             map=DENDRITEMAP(LRAND(seed)>>12);
-            ZLOOP(synapse,SYNAPSES)
+            ZLOOP(s,SYNAPSES)
             {
-                ZLOOP(axis,2) ipos.v[axis]+=map.offset[synapse].v[axis]; // x/y!
-                ipos.z=map.offset[synapse].v[2]%interface->input->size.z; // z!
-                if (op(interface,&ipos,&opos,dendrite,synapse))
+                ZLOOP(axis,2) ipos.v[axis]+=map.offset[s].v[axis]; // x/y!
+                ipos.z=map.offset[s].v[2]%interface->input->size.z; // z!
+                if (op(interface,&ipos,&opos,d,s))
                     goto done;
             }
         }
@@ -204,13 +213,20 @@ int Interface_traverse(Interface *interface,Synapse_op op)
                 
 int Synapse_score(Interface *interface,D3 *ipos,D3 *opos,int dendrite,int synapse)
 {
+    if (synapse==0)
+        interface->dendrites[opos->vol].dendrite[dendrite].score=0;
+    
     if (interface->input==interface->output && synapse==0) return 0; // don't let state use itself as input
     if (CLIP3V(ipos->v,interface->input->size.v))
     {
-        Synapse *syn=&interface->dendrites[opos->vol].synapse[dendrite][synapse];
-        if ((syn->sensitivity & interface->input->state[ipos->vol]) && (syn->permanence > DIST_THRESH))
-            interface->output->score[opos->vol]+=1;
+        Synapse *syn=&interface->dendrites[opos->vol].dendrite[dendrite].synapse[synapse];
+        if ((syn->sensitivity & interface->input->state[ipos->vol]) && (syn->permanence > SYNAPSE_THRESH))
+            interface->dendrites[opos->vol].dendrite[dendrite].score+=1;
     }
+
+    if (synapse==SYNAPSES-1 && interface->dendrites[opos->vol].dendrite[dendrite].score > DENDRITE_THRESH)
+        interface->output->score[opos->vol]+=1;
+        
     return 0;
 }
 
@@ -218,7 +234,7 @@ int Synapse_suppress(Interface *interface,D3 *ipos,D3 *opos,int dendrite,int syn
 {
     if (interface->input==interface->output && synapse==0) return 0; // don't let state use itself as input
     if (CLIP3V(ipos->v,interface->input->size.v))
-        interface->input->suppression[ipos->vol] += (interface->output->score[opos->vol]*SYNAPSES/synapse);
+        interface->input->suppression[ipos->vol] += (interface->output->score[opos->vol]*(((float) SYNAPSES-synapse)/(float) SYNAPSES));
     return 0;
 }
 
@@ -227,9 +243,16 @@ int Synapse_train(Interface *interface,D3 *ipos,D3 *opos,int dendrite,int synaps
     if (interface->input==interface->output && synapse==0) return 0; // don't let state use itself as input
     if (!CLIP3V(ipos->v,interface->input->size.v))
     {
-        Synapse *syn=&interface->dendrites[opos->vol].synapse[dendrite][synapse];
+        Synapse *syn=&interface->dendrites[opos->vol].dendrite[dendrite].synapse[synapse];
         if (interface->output->state[opos->vol]&(IS_ACTIVE|WAS_ACTIVE))
-            syn->permanence+=interface->input->state[ipos->vol]?SYNAPSE_ADJUSTMENT:-SYNAPSE_ADJUSTMENT;
+        {
+            if (interface->input->state[ipos->vol])
+                syn->permanence+=SYNAPSE_ADJUSTMENT;
+            else
+                syn->permanence-=SYNAPSE_ADJUSTMENT;
+        }
+        syn->permanence=MIN(syn->permanence,MAX_PERMANENCE);
+        syn->permanence=MAX(syn->permanence,MIN_PERMANENCE);
     }
     return 0;
 }
@@ -271,7 +294,7 @@ int Region_update(Region *region)
         Interface_traverse(&region->interface[INTRA],Synapse_suppress);
         
         // activate sufficiently post-supporession stimulated cells;
-        ZLOOP(i,region->states.size.vol) if ((region->states.score[i]-region->states.suppression[i])>ACTIVE_THRESH)
+        ZLOOP(i,region->states.size.vol) if ((region->states.score[i]-region->states.suppression[i]) > ACTIVE_THRESH)
             region->states.state[i]|=IS_ACTIVE;
 
         // update synapses
@@ -279,17 +302,14 @@ int Region_update(Region *region)
     }
     else // an input layer... read from stdin
     {
-        D3 p,clip={{},3,3,1,0};
+        D3 p,a={{},1,1,0,0},b={{},6,6,1,0},c={{},7,7,1,0};
         static int offset=0;
         
         //printf("  Reading %d bytes:\n",region->states.size.vol);
         //ZLOOP(i,region->states.size.vol) region->states.state[i]=getchar();
         ZLOOP(i,region->states.size.vol) region->states.state[i]=0x00;
-        ZLOOPD3(p.v,clip.v)
-        {
-            j=(DIM3V(p.v,region->states.size.v)+offset)%region->states.size.vol;
-            region->states.state[j]=0xff;
-        }
+        ZLOOPD3(p.v,c.v) region->states.state[(DIM3V(p.v,region->states.size.v)+offset)%region->states.size.vol]=0xff;
+        LOOPD3(p.v,a.v,b.v) region->states.state[(DIM3V(p.v,region->states.size.v)+offset)%region->states.size.vol]=0x00;
         offset++;
         //printf("  Done!\n");
     }
@@ -415,12 +435,15 @@ Region_display(Region *region)
         }
         if (show_scores)
         {
-            suppression=region->states.suppression[opos.vol];
             score=region->states.score[opos.vol];
-            glColor4f(0.0,0.0,suppression/16.0,1.0);
-            draw_cell(.3);
             glColor4f(0.0,0.0,score/16.0,1.0);
             draw_cell(.2);
+        }
+        if (show_suppression)
+        {
+            suppression=region->states.suppression[opos.vol];
+            glColor4f(0.0,0.0,suppression/16.0,1.0);
+            draw_cell(.3);
         }
     }
     glEnd();
@@ -486,7 +509,7 @@ int main(int argc, char **argv)
         
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT);
 
-        if (show_cells || show_scores)
+        if (show_cells || show_scores || show_suppression)
             ZLOOP(region,htm.regions) Region_display(&htm.region[region]);
 
         glDepthMask(GL_FALSE);
@@ -504,15 +527,15 @@ int main(int argc, char **argv)
  
     void reshape(int w,int h)
     {
-        float r=zoom * ((float) w/(float) h);
+        float r=((float) w/(float) h);
 
         gwidth=w;
         gheight=h;
         glViewport(0,0,(GLsizei) w,(GLsizei) h);
         glMatrixMode(GL_PROJECTION);
         glLoadIdentity();
-        if (w>h) glFrustum (-r,r,-zoom,zoom,0.5,500.0);
-        else     glFrustum (-zoom,zoom,-r,r,0.5,500.0);
+        if (w>h) glFrustum (zoom*-r,zoom*r,-zoom,zoom,0.5,500.0);
+        else     glFrustum (-zoom,zoom,zoom/-r,zoom/r,0.5,500.0);
 
 
         glMatrixMode(GL_MODELVIEW);
@@ -528,6 +551,7 @@ int main(int argc, char **argv)
             case 'd': show_dendrites=!show_dendrites; break;
             case 'm': show_map=!show_map; break;
             case 's': show_scores=!show_scores; break;
+            case 'S': show_suppression=!show_suppression; break;
             case 'r': break; // redisplay
         }
         glutPostRedisplay();
