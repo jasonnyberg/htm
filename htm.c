@@ -10,6 +10,7 @@
 #define DENDRITE_CACHE 0x1000
 #define SYNAPSES 32
 
+#define DECAY 1
 #define NOISE_FACTOR 20
 #define INIT_BIAS_RANGE 5
 #define INIT_PERMANENCE_RANGE 8
@@ -406,7 +407,7 @@ int Interface_suppress(Interface *interface)
 {
     int synapse_op(D3 *ipos,D3 *opos,int dendrite,int synapse)
     {
-        float suppression=0.2/synapse;
+        float suppression=0.1/synapse;
 
         if (interface->input==interface->output && synapse==0) return 0; // don't let cell use itself as input
     
@@ -484,7 +485,7 @@ int Region_update(Region *region)
         // age active states
         ZLOOP(i,region->states.size.vol)
         {
-            region->states.active[i]>>=8;
+            region->states.active[i]>>=DECAY;
             region->states.score[i]=0;
             region->states.suppression[i]=0;
         }
@@ -512,7 +513,7 @@ int Region_update(Region *region)
         // age predictive states
         ZLOOP(i,region->states.size.vol)
         {
-            region->states.predict[i]>>=8;
+            region->states.predict[i]>>=DECAY;
             region->states.score[i]=0;
             region->states.suppression[i]=0;
         }
@@ -569,11 +570,11 @@ int main(int argc, char **argv)
 {
     int gwidth=400,gheight=400;
     
-    float camera[] = { 25,-25,15 };
-    float center[] = { 8,8,8 };
+    float camera[] = { 6,-25,15 };
+    float center[] = { 0,0,8 };
 
     float viewup[] = { 0,0,1 };
-    float zoom=.3;
+    float zoom=.35;
 
     int mousestate[6]={0,0,0,0,0,0};
     int mousepos[2]={0,0};
@@ -582,10 +583,10 @@ int main(int argc, char **argv)
     Htm htm;
     RegionDesc rd[]= {
         //   size             pos         breadth        depth  ll
-        {{{},16,16,1,0}, {{}, 0, 0, 0}, {{},0, 0, 0}, {{}, 0, 0, 0}, 0},
-        {{{},16,16,4,0}, {{}, 0, 0, 8}, {{},16, 8, 0}, {{}, 2, 8, 0}, 1},
-        //{{{},16,16,4,0}, {{}, 0, 0, 8}, {{},16, 8, 8}, {{}, 2, 8, 8}, 1},
-        //{{{}, 8, 8,4,0}, {{}, 4, 4,16}, {{},8, 8, 0}, {{}, 8, 8, 0}, 1}
+        {{{},16,16,1,0}, {{}, -8, -8, 0}, {{}, 0, 0, 0}, {{}, 0, 0, 0}, 0},
+        {{{},32,32,1,0}, {{},-16,-16, 8}, {{},16,16, 0}, {{}, 2, 8, 0}, 1},
+        //{{{},16,16,4,0}, {{}, -8, -8, 8}, {{},16, 8, 8}, {{}, 2, 8, 8}, 1},
+        //{{{}, 8, 8,4,0}, {{}, -4, -4,16}, {{}, 8, 8, 0}, {{}, 8, 8, 0}, 1}
     };
         
     Htm_init(&htm,rd,2);
@@ -635,12 +636,14 @@ int main(int argc, char **argv)
 
         int Interface_display(Interface *interface)
         {
+            fvec jitter={{},0,0,0};
+            fvec scale={{},0,0,0.05};
+            fvec vertex;
+            int axis;
+            static int show=1;
+            
             int synapse_op(D3 *ipos,D3 *opos,int dendrite,int synapse)
             {
-                fvec vertex;
-                int axis;
-                static int show=1;
-    
                 int active=interface->output->active[opos->vol];
                 int predict=interface->output->predict[opos->vol];
                 if (active || predict)
@@ -660,7 +663,7 @@ int main(int argc, char **argv)
         
                     if (CLIP3D(ipos->v,interface->input->size.v))
                     {
-                        ZLOOP(axis,3) vertex.v[axis]=ipos->v[axis]+interface->input->position.v[axis];
+                        ZLOOP(axis,3) vertex.v[axis]=ipos->v[axis]+(opos->v[axis]+jitter.v[axis])*scale.v[axis]+interface->input->position.v[axis];
                         if (show)
                             glVertex3fv(vertex.v);
                     }
@@ -671,8 +674,16 @@ int main(int argc, char **argv)
     
                 return 0;
             }
-            
-            return Interface_traverse(interface,synapse_op);
+
+            if (interface->output && interface->output->size.vol)
+            {
+                jitter.x = interface->output->position.x;
+                scale.x = .5/interface->output->size.x;
+                jitter.y = interface->output->position.y;
+                scale.y = .5/interface->output->size.y;
+                return Interface_traverse(interface,synapse_op);
+            }
+            else return 0;
         }
 
         int Scoring_display(Region *region)
