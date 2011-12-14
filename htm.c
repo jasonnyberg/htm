@@ -121,7 +121,7 @@ typedef struct
     Dendrites *dendrites;
 } Interface;
 
-enum { FEEDFWD,INTRA,FEEDBACK,INTERFACES }; // inter-region interfaces
+typedef enum { FEEDFWD,INTRA,FEEDBACK,INTERFACES } HTM_INPUT; // inter-region interfaces
 
 typedef struct
 {
@@ -415,7 +415,7 @@ int Interface_score(Interface *interface,HTM_STATE state)
 }
 
 
-int Interface_adjust(Interface *interface,HTM_STATE state)
+int Interface_adjust(Interface *interface,HTM_INPUT input)
 {
 #define INC(x,y) ((x)=MAX((x),(typeof(x)) ((x)+(y))))
 #define DEC(x,y) ((x)=MIN((x),(typeof(x)) ((x)-(y))))
@@ -432,11 +432,11 @@ int Interface_adjust(Interface *interface,HTM_STATE state)
         {
             int in_state=0,out_state=0;
             
-            if (state&ACTIVE && interface->input->active[ipos->vol])
+            if (input==FEEDFWD  && interface->input->active[ipos->vol] > den->sensitivity+dens->bias)
                 in_state+=1;
-            if (state&PREDICTED && interface->input->active[ipos->vol])
+            if (input==INTRA    && interface->input->active[ipos->vol]<<DECAY) // step back in time
                 in_state+=1;
-            if (state&IMAGINED && interface->input->imagined[ipos->vol])
+            if (input==FEEDBACK && interface->input->active[ipos->vol]<<DECAY) // step back in time
                 in_state+=1;
             
             out_state=interface->output->active[opos->vol] & IS_ACTIVE;
@@ -444,9 +444,9 @@ int Interface_adjust(Interface *interface,HTM_STATE state)
             if (out_state)
             {
                 if (in_state)
-                    INC(syn->permanence,STRONGER); // increment if both "on"
+                    INC(syn->permanence,STRONGER);
                 else
-                    DEC(syn->permanence,WEAKER); // decrement if only one or other is "on"
+                    DEC(syn->permanence,WEAKER);
             }
         }
         
@@ -500,10 +500,9 @@ int Htm_update(Htm *htm)
         if (!region) return !0;
         if (region->interface[FEEDFWD].input)
         {
-            Interface_score(&region->interface[FEEDFWD],ACTIVE|PREDICTED);
+            Interface_score(&region->interface[FEEDFWD],ACTIVE);
             Interface_suppress(&region->interface[INTRA]);
             ZLOOP(i,region->states.size.vol) if (region->states.score[i]>0) region->states.active[i]|=IS_ACTIVE;
-            Interface_adjust(&region->interface[FEEDFWD],ACTIVE);
         }
         else
         {
@@ -521,16 +520,12 @@ int Htm_update(Htm *htm)
         }
     }
 
-    int adjust_intra(Region *region)
+    int adjust(Region *region)
     {
         if (!region) return !0;
-        Interface_adjust(&region->interface[INTRA],PREDICTED);
-    }
-    
-    int adjust_feedback(Region *region)
-    {
-        if (!region) return !0;
-        Interface_adjust(&region->interface[FEEDBACK],PREDICTED);
+        Interface_adjust(&region->interface[FEEDFWD],FEEDFWD);
+        Interface_adjust(&region->interface[INTRA],INTRA);
+        Interface_adjust(&region->interface[FEEDBACK],FEEDBACK);
     }
     
     int predict(Region *region)
@@ -542,8 +537,8 @@ int Htm_update(Htm *htm)
     
     int imagine1(Region *region)
     {
-        //Interface_rscore(&region->interface[FEEDFWD],PREDICTED | IMAGINED);        
-        Interface_rscore(&region->interface[FEEDFWD],ACTIVE);        
+        Interface_rscore(&region->interface[FEEDFWD],PREDICTED | IMAGINED);
+        //Interface_score(&region->interface[INTRA],PREDICTED | IMAGINED);
         ZLOOP(i,region->states.size.vol) if (region->states.score[i]>0) region->states.imagined[i]|=IS_ACTIVE;
     }
     
@@ -561,18 +556,19 @@ int Htm_update(Htm *htm)
     zsuppression();
     
     ZLOOP(r,htm->regions) sense(&htm->region[r]);
-    ZLOOP(r,htm->regions) adjust_intra(&htm->region[r]);
-    ZLOOP(r,htm->regions) adjust_feedback(&htm->region[r]);
+    ZLOOP(r,htm->regions) adjust(&htm->region[r]);
 
     zpredicted();
     zscore();
     ZRLOOP(r,htm->regions) predict(&htm->region[r]);
 
-    zscore();
     zimagined();
-    ZRLOOP(r,htm->regions) imagine1(&htm->region[r]);
-    // ZLOOP(r,htm->regions) imagine2(&htm->region[r]);
-    
+    if (do_generative)
+    {
+        zscore();
+        ZRLOOP(r,htm->regions) imagine1(&htm->region[r]);
+        //ZLOOP(r,htm->regions) imagine2(&htm->region[r]);
+    }
     cycles++;
     
     return 0;
