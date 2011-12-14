@@ -44,6 +44,8 @@ typedef struct { int v[0]; int x,y,z,vol; } D3;
 
 #define LOOP(i,from,to) for ((i)=(from);(i)<(to);(i)++)
 #define ZLOOP(i,lim) LOOP((i),0,lim)
+#define RLOOP(i,from,to) for ((i)=(from-1);(i)>=(to);(i)--)
+#define ZRLOOP(i,lim) RLOOP((i),lim,0)
 #define LOOPD3(iv,fromv,tov) LOOP((iv)[0],(fromv)[0],(tov)[0]) LOOP((iv)[1],(fromv)[1],(tov)[1]) LOOP((iv)[2],(fromv)[2],(tov)[2])
 #define ZLOOPD3(iv,limv) LOOP((iv)[0],0,(limv)[0]) LOOP((iv)[1],0,(limv)[1]) LOOP((iv)[2],0,(limv)[2])
 
@@ -62,14 +64,14 @@ typedef enum { SPATIAL,TEMPORAL,GENERATIVE } HTM_STAGE;
 int cycles=0;
 Seed gseed={{},NULL,NULL};
 
-int show_cells=1;
-int show_dendrites=1;
+int show_cells=0;
+int show_dendrites=0;
 int show_map=0;
 int show_scores=0;
 int show_suppression=0;
 int show_risers=0;
 int show_predictions=1;
-int show_tex=0;
+int show_tex=1;
 int hide_input=0;
 int do_generative=1;
 
@@ -88,7 +90,7 @@ typedef struct
 {
     Synapse *synapse;
     unsigned char sensitivity;
-    short score;
+    unsigned char score;
 } Dendrite;
 
 typedef struct
@@ -103,6 +105,7 @@ typedef struct
     fvec position;
     unsigned char *active;  // 50% decay per tick
     unsigned char *predicted;
+    unsigned char *imagined;
     float *score;
     float *suppression;
 } StateMap;
@@ -112,7 +115,7 @@ typedef struct
     StateMap *input;
     StateMap *output;
     int breadth,depth; // dendrites,synapses
-    D3 size,offset; // region of input to sample
+    D3 insize,offset; // region of input to sample
     Dendrites *dendrites;
 } Interface;
 
@@ -189,10 +192,12 @@ int StateMap_init(StateMap *map,D3 *size,fvec *position)
     map->position=*position;
     map->active=malloc(size->vol*sizeof(map->active[0]));
     map->predicted=malloc(size->vol*sizeof(map->predicted[0]));
+    map->imagined=malloc(size->vol*sizeof(map->imagined[0]));
     map->score=malloc(size->vol*sizeof(map->score[0]));
     map->suppression=malloc(size->vol*sizeof(map->suppression[0]));
     bzero(map->active,size->vol*sizeof(map->active[0]));
     bzero(map->predicted,size->vol*sizeof(map->predicted[0]));
+    bzero(map->imagined,size->vol*sizeof(map->imagined[0]));
     bzero(map->score,size->vol*sizeof(map->score[0]));
     bzero(map->suppression,size->vol*sizeof(map->suppression[0]));
     return 0;
@@ -337,7 +342,7 @@ int Interface_traverse(Interface *interface,Synapse_op op)
                                  ipos->x,ipos->y,ipos->z,opos->x,opos->y,opos->z,dendrite,synapse,      \
                                  args)
 
-int Interface_score(Interface *interface)
+int Interface_score(Interface *interface,HTM_STAGE stage)
 {
     int dthresh=2;
     
@@ -359,13 +364,25 @@ int Interface_score(Interface *interface)
         sp=stoch_perm(syn->permanence);
                       
         if (CLIP3D(ipos->v,interface->input->size.v))
+        {
             if (syn->permanence+sp > PTHRESH)
-                if (interface->input->active[ipos->vol] > den->sensitivity+dens->bias)
+            {
+                if (stage==SPATIAL)
                 {
-                    den->score+=1;
-                    if (interface->output->predicted[opos->vol] & IS_ACTIVE)
-                        den->score+=1; // synapses that would be active and are predicted to be active get an extra boost
+                    if (interface->input->active[ipos->vol] > den->sensitivity+dens->bias)
+                    {
+                        den->score+=1;
+                        if (interface->output->predicted[opos->vol] & IS_ACTIVE)
+                            den->score+=1; // synapses that would be active and are predicted to be active get an extra boost
+                    }
                 }
+                else if (stage==TEMPORAL)
+                {
+                    if (interface->input->predicted[ipos->vol] > den->sensitivity+dens->bias)
+                        den->score+=1;
+                }
+            }
+        }
         
         if (synapse==interface->depth-1)
             if (den->score >= dthresh)
@@ -378,7 +395,7 @@ int Interface_score(Interface *interface)
 }
 
 
-int Interface_select(Interface *interface)
+int Interface_suppress(Interface *interface)
 {
     float synapses=interface->depth;
     int i;
@@ -398,8 +415,10 @@ int Interface_select(Interface *interface)
     Interface_traverse(interface,synapse_op);
     
     ZLOOP(i,interface->output->size.vol)
-        if (((interface->output->score[i])*synapses-interface->output->suppression[i]) > 0)
-            interface->output->active[i]|=IS_ACTIVE;
+    {
+        interface->output->score[i]*=synapses;
+        interface->output->score[i]-=interface->output->suppression[i];
+    }
     
     return 0;
 }
@@ -407,8 +426,8 @@ int Interface_select(Interface *interface)
 
 int Interface_adjust(Interface *interface,HTM_STAGE stage)
 {
-#define INC(x,y) ((x)=MAX((x),(typeof(x))((x)+(y))))
-#define DEC(x,y) ((x)=MIN((x),(typeof(x))((x)-(y))))
+#define INC(x,y) ((x)=MAX((x),(typeof(x)) ((x)+(y))))
+#define DEC(x,y) ((x)=MIN((x),(typeof(x)) ((x)-(y))))
     
     int synapse_op(D3 *ipos,D3 *opos,int dendrite,int synapse)
     {
@@ -429,7 +448,7 @@ int Interface_adjust(Interface *interface,HTM_STAGE stage)
                 {
                     in_state+=1;
                     if (interface->output->predicted[opos->vol] > den->sensitivity+dens->bias)
-                        in_state+=2; // synapses that would be active and are predicted to be active get an extra boost
+                        in_state+=1; // synapses that would be active and are predicted to be active get an extra boost
                 }
             }
             else if (stage==TEMPORAL)
@@ -452,36 +471,54 @@ int Interface_adjust(Interface *interface,HTM_STAGE stage)
     return Interface_traverse(interface,synapse_op);
 }
 
-
-int Region_update(Region *region)
+int Interface_imagine(Interface *interface)
 {
-    int i,j;
-    int interface;
-    D3 opos;
-    int dendrite;
-    
-    int spatial()
+    int synapse_op(D3 *ipos,D3 *opos,int dendrite,int synapse)
     {
-        if (region->interface[FEEDFWD].input) // spatial/temporal pooler
-        {
-            ZLOOP(i,region->states.size.vol)
-            {
-                region->states.active[i]>>=DECAY;
-                region->states.score[i]=0;
-                region->states.suppression[i]=0;
-            }
+        Dendrites *dens=&interface->dendrites[opos->vol];
+        Dendrite *den=&dens->dendrite[dendrite];
+        Synapse *syn=&den->synapse[synapse];
+        
+        if (interface->input==interface->output && synapse==0) return 0; // don't let cell use itself as input
+        
+        if (synapse>0 && CLIP3D(ipos->v,interface->input->size.v))
+            if (syn->permanence > PTHRESH)
+                if ((interface->output->predicted[opos->vol] | interface->output->imagined[opos->vol]) > den->sensitivity+dens->bias)
+                    interface->input->score[ipos->vol]++;
+        return 0;
+    }
+    
+    Interface_traverse(interface,synapse_op);
+    
+    return 0;
+}
 
-            Interface_score(&region->interface[FEEDFWD]);  // propagate inputs
-            Interface_select(&region->interface[INTRA]);   // calculate post-supporessed activations
-            Interface_adjust(&region->interface[FEEDFWD],SPATIAL); // update synapses
+int Htm_update(Htm *htm)
+{
+    int r,i,j;
+
+    int zactive()      { ZLOOP(r,htm->regions) ZLOOP(i,htm->region[r].states.size.vol) htm->region[r].states.active[i]>>=DECAY; }
+    int zpredicted()   { ZLOOP(r,htm->regions) ZLOOP(i,htm->region[r].states.size.vol) htm->region[r].states.predicted[i]>>=DECAY; }
+    int zimagined()    { ZLOOP(r,htm->regions) ZLOOP(i,htm->region[r].states.size.vol) htm->region[r].states.imagined[i]>>=8; }
+    int zscore()       { ZLOOP(r,htm->regions) ZLOOP(i,htm->region[r].states.size.vol) htm->region[r].states.score[i]=0; }
+    int zsuppression() { ZLOOP(r,htm->regions) ZLOOP(i,htm->region[r].states.size.vol) htm->region[r].states.suppression[i]=0; }
+    
+    int sense(Region *region)
+    {
+        if (!region) return !0;
+        if (region->interface[FEEDFWD].input)
+        {
+            Interface_score(&region->interface[FEEDFWD],SPATIAL);
+            Interface_suppress(&region->interface[INTRA]);
+            ZLOOP(i,region->states.size.vol) if (region->states.score[i]>0) region->states.active[i]|=IS_ACTIVE;
+            Interface_adjust(&region->interface[FEEDFWD],SPATIAL);
         }
         else
         {
+            //ZLOOP(i,region->states.size.vol) region->states.active[i]=getchar();
             D3 p,a={{},1,1,0,0},b={{},6,6,1,0},c={{},7,7,1,0};
             static int offset=0;
         
-            //printf("  Reading %d bytes:\n",region->states.size.vol);
-            //ZLOOP(i,region->states.size.vol) region->states.active[i]=getchar();
             ZLOOP(i,region->states.size.vol) region->states.active[i]=0x00;
             if (!hide_input)
             {
@@ -489,47 +526,59 @@ int Region_update(Region *region)
                 LOOPD3(p.v,a.v,b.v) region->states.active[(DIM3D(p.v,region->states.size.v)+offset)%region->states.size.vol]=0x00;
             }
             offset++;
-            //printf("  Done!\n");
         }
     }
 
-    int temporal()
+    int adjust(Region *region)
     {
-        Interface_adjust(&region->interface[INTRA],TEMPORAL); // update synapses
-        Interface_adjust(&region->interface[FEEDBACK],TEMPORAL); // update synapses
+        if (!region) return !0;
+        Interface_adjust(&region->interface[INTRA],TEMPORAL);
+        Interface_adjust(&region->interface[FEEDBACK],TEMPORAL);
     }
     
-    int generative()
+    
+    int predict(Region *region)
     {
-        ZLOOP(i,region->states.size.vol)
-        {
-            region->states.predicted[i]=0;
-            region->states.score[i]=0;
-        }
+        Interface_score(&region->interface[INTRA],SPATIAL);
+        Interface_score(&region->interface[FEEDBACK],SPATIAL);
+        ZLOOP(i,region->states.size.vol) if (region->states.score[i]>0) region->states.predicted[i]|=IS_ACTIVE;
+    }
+    
+    int imagine(Region *region)
+    {
+        Interface_score(&region->interface[FEEDBACK],TEMPORAL);
+        Interface_score(&region->interface[INTRA],TEMPORAL);
+        Interface_score(&region->interface[FEEDFWD],TEMPORAL);
         
-        Interface_score(&region->interface[INTRA]); // calculate post-suppressed predictions
-        //Interface_score(&region->interface[FEEDBACK]); // calculate post-suppressed predictions
-        ZLOOP(i,region->states.size.vol) if (region->states.score[i]) region->states.predicted[i]|=IS_ACTIVE;
-
+        Interface_imagine(&region->interface[FEEDBACK]);
+        Interface_imagine(&region->interface[INTRA]);
+        Interface_imagine(&region->interface[FEEDFWD]);
+        
+        //Interface_suppress(&region->interface[INTRA]);
+        
+        ZLOOP(i,region->states.size.vol) if (region->states.score[i]>0) region->states.imagined[i]|=IS_ACTIVE;
     }
     
-    if (!region) return !0;
+    if (!htm) return !0;
+    zactive();
+    zscore();
+    zsuppression();
     
-    spatial();
-    temporal();
-    generative();
+    ZLOOP(r,htm->regions) sense(&htm->region[r]);
+    ZLOOP(r,htm->regions) adjust(&htm->region[r]);
+
+    zpredicted();
+    zscore();
+    
+    ZRLOOP(r,htm->regions) predict(&htm->region[r]);
+
+    zscore();
+    zimagined();
+    ZRLOOP(r,htm->regions) imagine(&htm->region[r]);
+    
+    cycles++;
     
     return 0;
-}
-
-
-int Htm_update(Htm *htm)
-{
-    int r;
-    if (!htm) return !0;
-    ZLOOP(r,htm->regions) Region_update(&htm->region[r]);
-    cycles++;
-
 }
 
 
@@ -547,7 +596,7 @@ int main(int argc, char **argv)
     float center[] = { 0,0,8 };
 
     float viewup[] = { 0,0,1 };
-    float zoom=.35;
+    float zoom=.50;
 
     int mousestate[6]={0,0,0,0,0,0};
     int mousepos[2]={0,0};
@@ -557,7 +606,7 @@ int main(int argc, char **argv)
     RegionDesc rd[]= {
         //   size             pos         breadth        depth  ll
         {{{},16,16,1,0}, {{}, -8, -8, -8}, {{}, 0, 4, 8}, {{}, 0, 4, 8}, 0},
-        {{{},32,32,1,0}, {{},-16,-16,  8}, {{},16, 4, 0}, {{}, 2, 8, 0}, 1},
+        {{{},32,32,1,0}, {{},-16,-16,  8}, {{},16, 8, 0}, {{}, 2, 8, 0}, 1},
         //{{{},16,16,4,0}, {{}, -8, -8, 8}, {{},16, 8, 8}, {{}, 2, 8, 8}, 1},
         //{{{}, 8, 8,4,0}, {{}, -4, -4,16}, {{}, 8, 8, 0}, {{}, 8, 8, 0}, 1}
     };
@@ -622,7 +671,8 @@ int main(int argc, char **argv)
                     GLubyte map[interface->output->size.x][interface->breadth][interface->output->size.y][interface->depth][4];
                     D3 opos={{},0,0,0};
                     int d,s;
-                    int active,predict,perm;
+                    int active,predicted,imagined,perm,score;
+                    GLubyte r,g,b,a;
                     float x,y,z,w,h;
                     
                     BZERO(map);
@@ -632,12 +682,20 @@ int main(int argc, char **argv)
                         ZLOOP(d,interface->breadth) ZLOOP(s,interface->depth)
                         {
                             active=interface->output->active[opos.vol];
-                            predict=interface->output->predicted[opos.vol];
+                            predicted=interface->output->predicted[opos.vol];
+                            imagined=interface->output->imagined[opos.vol];
                             perm=interface->dendrites[opos.vol].dendrite[d].synapse[s].permanence;
-                            map[opos.x][d][opos.y][s][0]=(GLubyte) active;
-                            map[opos.x][d][opos.y][s][1]=(GLubyte) predict;
-                            map[opos.x][d][opos.y][s][2]=(GLubyte) (perm>PTHRESH?perm:0);
-                            map[opos.x][d][opos.y][s][3]=(GLubyte) perm;
+                            score=interface->output->score[opos.vol];
+                            r=active;
+                            g=predicted;
+                            r|=perm<PTHRESH?(PTHRESH-perm-1)*2:0;
+                            g|=perm>PTHRESH?(perm-PTHRESH)*2:0;
+                            b=imagined?0xff:0;
+                            a=0xff;
+                            map[opos.x][d][opos.y][s][0]=r;
+                            map[opos.x][d][opos.y][s][1]=g;
+                            map[opos.x][d][opos.y][s][2]=b;
+                            map[opos.x][d][opos.y][s][3]=a;
                         }
                     }
                     
@@ -646,21 +704,19 @@ int main(int argc, char **argv)
                 
                     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
                     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
-                    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER,GL_NEAREST);
-                    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER,GL_NEAREST);
-                    glTexImage2D(GL_TEXTURE_2D,
-                                 0,
-                                 GL_RGBA,
-                                 interface->output->size.y*interface->depth,
-                                 interface->output->size.x*interface->breadth,
-                                 0,
-                                 GL_RGBA,
-                                 GL_UNSIGNED_BYTE, 
-                                 map);
+                    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER,GL_NEAREST_MIPMAP_LINEAR);
+                    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER,GL_NEAREST_MIPMAP_LINEAR);
+                    gluBuild2DMipmaps(GL_TEXTURE_2D,
+                                      GL_RGBA,
+                                      interface->output->size.y*interface->depth,
+                                      interface->output->size.x*interface->breadth,
+                                      GL_RGBA,
+                                      GL_UNSIGNED_BYTE, 
+                                      map);
                 
                     x=interface->output->position.x-.5;
                     y=interface->output->position.y-.5;
-                    z=interface->output->position.z;
+                    z=interface->output->position.z-.1;
                     w=interface->output->size.x+.5;
                     h=interface->output->size.y+.5;
                 
