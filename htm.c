@@ -10,19 +10,13 @@
 #define DENDRITE_CACHE 0x1000
 #define SYNAPSES 32
 
-#define DECAY 1
+#define DECAY 4
 #define NOISE_FACTOR 50.0
-#define INIT_BIAS_RANGE 5
-#define INIT_PERMANENCE_RANGE 8
 #define IS_ACTIVE 0x80
 #define WAS_ACTIVE (IS_ACTIVE>>DECAY)
 #define SYNAPSE_ADJUSTMENT 1
-#define MAX_CHAR 0xff
-#define MIN_CHAR 0x00
 
 #define PTHRESH 0x80
-#define DTHRESH 2 // (interface->depth/8+1)
-#define ATHRESH 2 // (region->dendrites/8+1)
 
 
 #define MIN(x,y) ((x)<(y)?(x):(y))
@@ -63,6 +57,7 @@ typedef struct { cvec offset[SYNAPSES]; } DendriteMap;
 DendriteMap gDendriteMap[DENDRITE_CACHE];
 #define DENDRITEMAP(i) (gDendriteMap[(i)%DENDRITE_CACHE])
 
+typedef enum { SPATIAL,TEMPORAL,GENERATIVE } HTM_STAGE;
 
 int cycles=0;
 Seed gseed;
@@ -75,6 +70,7 @@ int show_suppression=0;
 int show_risers=0;
 int show_predictions=1;
 int hide_input=0;
+int generative=0;
 
 
 /********************************************************************************************
@@ -340,25 +336,23 @@ int Interface_traverse(Interface *interface,Synapse_op op)
     return status;
 }
 
-#define SHOW(fmt,args...) printf("%d,%d,%d %d,%d,%d %d %d " fmt "\n",                        \
-                              ipos->x,ipos->y,ipos->z,opos->x,opos->y,opos->z,dendrite,synapse, \
-                              args)
+#define SHOW(fmt,args...) printf("%d,%d,%d %d,%d,%d %d %d " fmt "\n",                                   \
+                                 ipos->x,ipos->y,ipos->z,opos->x,opos->y,opos->z,dendrite,synapse,      \
+                                 args)
 
-int Interface_score(Interface *interface,int predictive)
+int Interface_score(Interface *interface,HTM_STAGE stage)
 {
-    double sp;
-    
-    double stoch_perm(unsigned char p)
-    {
-        return ((DRAND(gseed)*NOISE_FACTOR))/(double)(ABS(PTHRESH-p)+1);
-    }
+    int dthresh[3]={2,2,3};
     
     int synapse_op(D3 *ipos,D3 *opos,int dendrite,int synapse)
     {
         Dendrites *dens=&interface->dendrites[opos->vol];
         Dendrite *den=&dens->dendrite[dendrite];
         Synapse *syn=&den->synapse[synapse];
-
+        double sp;
+        
+        double stoch_perm(unsigned char p) { return ((DRAND(gseed)*NOISE_FACTOR))/(double)(ABS(PTHRESH-p)+1); }
+    
         if (synapse==0)
         {
             den->score=0;
@@ -371,27 +365,32 @@ int Interface_score(Interface *interface,int predictive)
         {
             if (syn->permanence+sp >= PTHRESH)
             {
-                if (predictive)
-                {
-                    if ((interface->input->state[0][ipos->vol]<<DECAY) & interface->output->state[0][opos->vol])
-                        den->score+=1;
-                    if ((interface->input->state[1][ipos->vol]<<DECAY) & interface->output->state[0][opos->vol])
-                        den->score+=1;
-                }
-                else
+                if (stage==SPATIAL)
                 {
                     if (interface->input->state[0][ipos->vol] > den->sensitivity+dens->bias)
                     {
                         den->score+=1;
+                        if (interface->output->state[1][opos->vol] & IS_ACTIVE)
+                            den->score+=2; // synapses that would be active and are predicted to be active get an extra boost
                     }
                 }
-                if (interface->output->state[1][opos->vol] & IS_ACTIVE)
-                    den->score+=1; // synapses that can be and are predicted to be active get an extra boost
+                else if (stage==TEMPORAL)
+                {
+                    if ((interface->input->state[0][ipos->vol]<<DECAY) & interface->output->state[0][opos->vol])
+                        den->score+=1;
+                }
+                else if (stage==GENERATIVE)
+                {
+                    if (interface->input->state[1][ipos->vol] > den->sensitivity+dens->bias)
+                    {
+                        den->score+=1;
+                    }
+                }
             }
         }
 
         if (synapse==interface->depth-1)
-            if (den->score >= DTHRESH)
+            if (den->score >= dthresh[stage])
                 interface->output->score[opos->vol] += den->score;
 
         return 0;
@@ -410,7 +409,6 @@ int Interface_select(Interface *interface,int predictive)
     {
         if (synapse>0 && CLIP3D(ipos->v,interface->input->size.v))
         {
-            //float suppression=1.0/synapse;
             float suppression=(synapses-synapse-1)/synapses;
             interface->input->suppression[ipos->vol] += interface->output->score[opos->vol] * suppression;
         }
@@ -423,7 +421,7 @@ int Interface_select(Interface *interface,int predictive)
     Interface_traverse(interface,synapse_op);
 
     ZLOOP(i,interface->output->size.vol)
-        if (((interface->output->score[i]*synapses)-interface->output->suppression[i]) >= ATHRESH)
+        if (((interface->output->score[i]*synapses)-interface->output->suppression[i]) > 0)
             interface->output->state[predictive][i]|=IS_ACTIVE;
 
     return 0;
@@ -448,14 +446,25 @@ int Interface_adjust(Interface *interface,int predictive)
     
         if (CLIP3D(ipos->v,interface->input->size.v))
         {
-            int in_state=predictive?
-                interface->input->state[0][ipos->vol] & WAS_ACTIVE:
-                interface->input->state[0][ipos->vol] > den->sensitivity+dens->bias;
-            int out_state=interface->output->state[0][opos->vol] & IS_ACTIVE;
+            int in_state=0,out_state=0;
+
+            if (predictive)
+            {
+                if (interface->input->state[0][ipos->vol] & WAS_ACTIVE)
+                    in_state++;
+                if (interface->input->state[1][ipos->vol] & WAS_ACTIVE)
+                    in_state++;
+            }
+            else
+            {
+                if (interface->input->state[0][ipos->vol] > den->sensitivity+dens->bias)
+                    in_state++;
+            }
+            
+            out_state=interface->output->state[0][opos->vol] & IS_ACTIVE;
             
             if (in_state && out_state)
-                INC(syn->permanence,adj*3); // increment if both "on"
-            //else if (in_state || out_state)
+                INC(syn->permanence,adj); // increment if both "on"
             else if (!in_state && out_state)
                 DEC(syn->permanence,adj); // decrement if only one or other is "on"
         }
@@ -501,8 +510,8 @@ int Region_update(Region *region)
             region->states.suppression[i]=0;
         }
 
-        Interface_score(&region->interface[FEEDFWD],0); // propagate inputs
-        Interface_select(&region->interface[INTRA],0); // calculate post-supporessed activations
+        Interface_score(&region->interface[FEEDFWD],SPATIAL);  // propagate inputs
+        Interface_select(&region->interface[INTRA],0);   // calculate post-supporessed activations
         Interface_adjust(&region->interface[FEEDFWD],0); // update synapses
     }
 
@@ -516,9 +525,16 @@ int Region_update(Region *region)
             region->states.suppression[i]=0;
         }
 
-        Interface_score(&region->interface[INTRA],1); // propagate
-        Interface_score(&region->interface[FEEDBACK],1); // propagate
+        Interface_score(&region->interface[INTRA],TEMPORAL); // propagate
+        Interface_score(&region->interface[FEEDBACK],TEMPORAL); // propagate
         Interface_select(&region->interface[INTRA],1); // calculate post-supporessed predictions
+
+        if (generative)
+        {
+            Interface_score(&region->interface[INTRA],GENERATIVE); // propagate
+            Interface_score(&region->interface[FEEDBACK],GENERATIVE); // propagate
+            Interface_select(&region->interface[INTRA],1); // calculate post-supporessed predictions
+        }
     }
     
     if (!region) return !0;
@@ -691,7 +707,7 @@ int main(int argc, char **argv)
                 switch(pos.z)
                 {
                     default:
-                    case 0: glColor4f(1,1,1,.5); break;
+                    case 0: glColor4f(.5,.5,.5,1); break;
                     case 1: glColor4f(1,0,0,1); break;
                     case 2: glColor4f(0,1,0,1); break;
                     case 3: glColor4f(0,0,1,1); break;
@@ -789,6 +805,7 @@ int main(int argc, char **argv)
             case 'r': show_risers=!show_risers; break;
             case 'p': show_predictions=!show_predictions; break;
             case 'h': hide_input=!hide_input; break;
+            case 'g': generative=!generative; break;
         }
     }
     
