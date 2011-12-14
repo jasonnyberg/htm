@@ -10,7 +10,7 @@
 #define DENDRITE_CACHE 0x1000
 #define SYNAPSES 32
 
-#define DECAY 7
+#define DECAY 4
 #define NOISE_FACTOR 5.0
 #define IS_ACTIVE 0x80
 #define WAS_ACTIVE (IS_ACTIVE>>DECAY)
@@ -69,6 +69,7 @@ int show_scores=0;
 int show_suppression=0;
 int show_risers=0;
 int show_predictions=1;
+int show_tex=0;
 int hide_input=0;
 int do_generative=1;
 
@@ -358,7 +359,7 @@ int Interface_score(Interface *interface)
         sp=stoch_perm(syn->permanence);
                       
         if (CLIP3D(ipos->v,interface->input->size.v))
-            if (syn->permanence+sp >= PTHRESH)
+            if (syn->permanence+sp > PTHRESH)
                 if (interface->input->active[ipos->vol] > den->sensitivity+dens->bias)
                 {
                     den->score+=1;
@@ -442,7 +443,7 @@ int Interface_adjust(Interface *interface,HTM_STAGE stage)
             if (in_state && out_state)
                 INC(syn->permanence,adj*in_state); // increment if both "on"
             else if (!in_state && out_state)
-                DEC(syn->permanence,adj*in_state); // decrement if only one or other is "on"
+                DEC(syn->permanence,adj); // decrement if only one or other is "on"
         }
         
         return 0;
@@ -507,7 +508,7 @@ int Region_update(Region *region)
         }
         
         Interface_score(&region->interface[INTRA]); // calculate post-suppressed predictions
-        Interface_score(&region->interface[FEEDBACK]); // calculate post-suppressed predictions
+        //Interface_score(&region->interface[FEEDBACK]); // calculate post-suppressed predictions
         ZLOOP(i,region->states.size.vol) if (region->states.score[i]) region->states.predicted[i]|=IS_ACTIVE;
 
     }
@@ -555,8 +556,8 @@ int main(int argc, char **argv)
     Htm htm;
     RegionDesc rd[]= {
         //   size             pos         breadth        depth  ll
-        {{{},16,16,1,0}, {{}, -8, -8, -8}, {{}, 0, 4, 6}, {{}, 0, 4, 6}, 0},
-        {{{},32,32,1,0}, {{},-16,-16, 8}, {{},16,16, 0}, {{}, 2, 8, 0}, 1},
+        {{{},16,16,1,0}, {{}, -8, -8, -8}, {{}, 0, 4, 8}, {{}, 0, 4, 8}, 0},
+        {{{},32,32,1,0}, {{},-16,-16,  8}, {{},16, 4, 0}, {{}, 2, 8, 0}, 1},
         //{{{},16,16,4,0}, {{}, -8, -8, 8}, {{},16, 8, 8}, {{}, 2, 8, 8}, 1},
         //{{{}, 8, 8,4,0}, {{}, -4, -4,16}, {{}, 8, 8, 0}, {{}, 8, 8, 0}, 1}
     };
@@ -606,6 +607,77 @@ int main(int argc, char **argv)
             glEnd();
         }
 
+        int Region_texture(Region *region,GLuint tid)
+        {
+            int i;
+            Interface *interface;
+            
+            if (region) ZLOOP(i,INTERFACES) if (i==INTRA)
+            {
+                interface=&htm.region[r].interface[i];
+            
+                glColor4f(1,1,1,1);
+                if (interface && interface->output && interface->output->size.vol)
+                {
+                    GLubyte map[interface->output->size.x][interface->breadth][interface->output->size.y][interface->depth][4];
+                    D3 opos={{},0,0,0};
+                    int d,s;
+                    int active,predict,perm;
+                    float x,y,z,w,h;
+                    
+                    BZERO(map);
+                    ZLOOP(opos.x,interface->output->size.x) ZLOOP(opos.y,interface->output->size.y)
+                    {
+                        (void) DIM3D(opos.v,interface->output->size.v);
+                        ZLOOP(d,interface->breadth) ZLOOP(s,interface->depth)
+                        {
+                            active=interface->output->active[opos.vol];
+                            predict=interface->output->predicted[opos.vol];
+                            perm=interface->dendrites[opos.vol].dendrite[d].synapse[s].permanence;
+                            map[opos.x][d][opos.y][s][0]=(GLubyte) active;
+                            map[opos.x][d][opos.y][s][1]=(GLubyte) predict;
+                            map[opos.x][d][opos.y][s][2]=(GLubyte) (perm>PTHRESH?perm:0);
+                            map[opos.x][d][opos.y][s][3]=(GLubyte) perm;
+                        }
+                    }
+                    
+                    glPixelStorei(GL_UNPACK_ALIGNMENT, 0);
+                    glBindTexture(GL_TEXTURE_2D,tid);
+                
+                    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
+                    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
+                    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER,GL_NEAREST);
+                    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER,GL_NEAREST);
+                    glTexImage2D(GL_TEXTURE_2D,
+                                 0,
+                                 GL_RGBA,
+                                 interface->output->size.y*interface->depth,
+                                 interface->output->size.x*interface->breadth,
+                                 0,
+                                 GL_RGBA,
+                                 GL_UNSIGNED_BYTE, 
+                                 map);
+                
+                    x=interface->output->position.x-.5;
+                    y=interface->output->position.y-.5;
+                    z=interface->output->position.z;
+                    w=interface->output->size.x+.5;
+                    h=interface->output->size.y+.5;
+                
+                    glEnable(GL_TEXTURE_2D);
+                    glTexEnvf(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_DECAL);
+                    glBindTexture(GL_TEXTURE_2D, tid);
+                    glBegin(GL_QUADS);
+                    glTexCoord2f(0.0, 0.0); glVertex3f(x,y,z);
+                    glTexCoord2f(0.0, 1.0); glVertex3f(x+w,y,z);
+                    glTexCoord2f(1.0, 1.0); glVertex3f(x+w,y+h,z);
+                    glTexCoord2f(1.0, 0.0); glVertex3f(x,y+h,z);
+                    glEnd();
+                    glDisable(GL_TEXTURE_2D);
+                }
+            }
+        }
+        
         int Interface_display(Interface *interface)
         {
             fvec jitter={{},0,0,0};
@@ -635,7 +707,7 @@ int main(int argc, char **argv)
                     
                     if (CLIP3D(ipos->v,interface->input->size.v))
                     {
-                        glColor4f(active/255.0,predict/255.0,perm>PTHRESH?perm/255.0:0,perm/255.0);
+                        glColor4f(active/255.0,predict/255.0,perm>PTHRESH?((perm-PTHRESH)/(float) PTHRESH):0,perm/255.0);
                         ZLOOP(axis,3) vertex.v[axis]=ipos->v[axis]+(opos->v[axis]+jitter.v[axis])*scale.v[axis]+interface->input->position.v[axis];
                         if (show)
                             glVertex3fv(vertex.v);
@@ -729,15 +801,11 @@ int main(int argc, char **argv)
 
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT);
 
-        if (show_cells)
-            ZLOOP(r,htm.regions) Region_display(&htm.region[r]);
-
-        if (show_scores || show_suppression)
-            ZLOOP(r,htm.regions) Scoring_display(&htm.region[r]);
-
+        if (show_cells) ZLOOP(r,htm.regions) Region_display(&htm.region[r]);
+        if (show_scores || show_suppression) ZLOOP(r,htm.regions) Scoring_display(&htm.region[r]);
+        if (show_tex) ZLOOP(r,htm.regions) Region_texture(&htm.region[r],1);
         glDepthMask(GL_FALSE);
-        if (show_dendrites)
-            ZLOOP(r,htm.regions) ZLOOP(i,INTERFACES) Interface_display(&htm.region[r].interface[i]);
+        if (show_dendrites) ZLOOP(r,htm.regions) ZLOOP(i,INTERFACES) Interface_display(&htm.region[r].interface[i]);
         glDepthMask(GL_TRUE);
 
         if (show_map)
@@ -775,6 +843,7 @@ int main(int argc, char **argv)
             case 'S': show_suppression=!show_suppression; break;
             case 'r': show_risers=!show_risers; break;
             case 'p': show_predictions=!show_predictions; break;
+            case 't': show_tex=!show_tex; break;
             case 'h': hide_input=!hide_input; break;
             case 'g': do_generative=!do_generative; break;
         }
