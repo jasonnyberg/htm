@@ -8,10 +8,10 @@
 
 #define DENDRITE_CACHE 0x1000
 #define DENDRITES 6
-#define SYNAPSES 6
+#define SYNAPSES 8
 
-#define SYNAPSE_THRESH 2
-#define DENDRITE_THRESH 2
+#define SYNAPSE_THRESH 4
+#define DENDRITE_THRESH 1
 #define ACTIVE_THRESH 1
 #define INIT_PERMANENCE_RANGE 20
 #define IS_ACTIVE 0x80
@@ -377,11 +377,10 @@ int Synapse_display(Interface *interface,D3 *ipos,D3 *opos,int dendrite,int syna
     {
         if (synapse==0)
         {
-            if (dendrite==0 )
-            {
-                int state=interface->output->state[opos->vol];
-                glColor4f(state&IS_ACTIVE?1.0:0.0,state&WAS_ACTIVE?1.0:0.0,0,state/255.0);
-            }
+            int state=interface->output->state[opos->vol];
+            int score=interface->dendrites[opos->vol].dendrite[dendrite].score;
+            glColor4f(state&IS_ACTIVE?1.0:0.0,state&WAS_ACTIVE?1.0:0.0,score>DENDRITE_THRESH?1.0:0.0,state/255.0);
+            
             glBegin(GL_LINE_STRIP);
             ZLOOP(axis,3) vertex.v[axis]=opos->v[axis]+interface->output->position.v[axis];
             glVertex3fv(vertex.v);
