@@ -1,30 +1,24 @@
 #include <stdlib.h>
 #include <stdio.h>
-#include <string.h>
-
-#include <GL/glut.h>
+#include <GL/gl.h>
+#include <GL/glu.h>
+#include <GL/freeglut.h>
 
 #define PROX_THRESH 0.5
 #define DIST_THRESH 0.5
 #define CONNECTED 128
 
-
-int cycles=0;
-#define TICKS 2
-#define TICK(t) ((cycles-(t))%TICKS)
-
-int I=16; // input 2d dimension
-int F=8; // input->column fanout
-int D=4; // node root dimension
-
-typedef long long Bits64;
-typedef char Coarse;
-typedef float Fine;
-
 typedef unsigned short Seed[3];
 #define LRAND(seed) (nrand48(seed))
 #define DRAND(seed) (drand48(seed))
 
+int cycles=0;
+#define TICKS 8
+#define TICK(t) ((cycles+(t))%TICKS)
+
+int I=16; // input 2d dimension
+int F=16; // input->column fanout
+int D=4; // node root dimension
 
 #define DIM2(x,y) (((x)*D)|(y))
 #define DIM3(x,y,z) DIM2(DIM2((x),(y)),(z))
@@ -36,130 +30,146 @@ typedef unsigned short Seed[3];
 #define GETNIB(bits,x,y) (((bits)>>(DIM3((x),(y),0)))&(typeof(bits) 0xf))
 #define SETNIB(bits,x,y,val) ((bits)=((bits)&~((typeof(bits) 0xf)<<(DIM3((x),(y),0)))) | ((bits)|(((val)&(typeof(bits) 0xf))<<(DIM3((x),(y),0)))))
 
+typedef long long Bits64;
+
 typedef struct
 {
-    short  col_output     [TICKS] [D][D];                     // each nibble id's the active column in each node
-    short  cell_active    [TICKS] [D][D][D];                  // bit per cell per plane per node
-    Coarse col_potential          [D][D] [D][D];              // node (xy)(column(xy))
-    Coarse col_bias               [D][D] [D][D];              // node (xy)(column(xy))
-    Coarse distal                 [D][D] [D][D][D] [D][D][D]; // synapse permanence of node(xy)(cell_to(xyz),cell_from(xyz))
+    short size;
+    Float *strength;
+} InputMap;
 
-    int inputsize;
-    char *inputs[TICKS];
-    Coarse *proximal; // synapse permanence from input x to col y
+void map_init(InputMap *map,int size,int unpack)
+{
+    int i;
     Seed seed;
+    map->size=size*8*F;
+    map->strength=malloc(size);
+    seed=(Seed) map;
+    LOOP(map->size,i) map->strength[i]=DRAND(seed);
+}
 
+
+typedef struct
+{
+    short  col_active  [TICKS] [D][D];                     // each nibble id's the active column in each node
+    Bits64 cell_active [TICKS] [D][D];                     // bit per cell per node
+    Float  col_bias            [D][D] [D][D];              // node (xy)(column(xy))
+    Float  dist                [D][D] [D][D][D] [D][D][D];
+    InputMap prox;
 } Region;
 
 #define LOOP(r,v) for ((v)=0;(v)<(r);(v)++)
 
-#define FFS(b) __builtin_ffs(b)
-#define FFSLL(b) __builtin_ffsll(b)
+#define FFS(b) (__builtin_ffs(b)-1)
+#define FFSLL(b) (__builtin_ffsll(b)-1)
 #define POPCOUNT(b) __builtin_popcount(b)
 #define POPCOUNTLL(b) __builtin_popcountll(b)
 
-void region_init(Region *region)
-{
-    int nx,ny,x,y,z,x2,y2,z2,fanout;
-    Seed seed;
-       
-    BZERO(region);
-    LRAND(region->seed);
-    seed=region->seed;
-
-       
-    LOOP(D,nx) LOOP(D,ny)
-        LOOP(D,x) LOOP(D,y) LOOP(D,z)
-        LOOP(D,x2) LOOP(D,y2) LOOP(D,z2)
-        region->synapse[nx][ny][x][y][z][x2][y2][z2]=LRAND(seed);
-}
-   
-// accept a count and series of bytes, each of which ids a column(nx:2,ny:2,cx:2,cy:2) to sensitize
-void region_read(Region *region,int size,char *data)
+void region_init(Region *region,int inputbits)
 {
     int i;
-   
-    if (!inputsize)
-    {
-        inputsize=size;
-        inputs=malloc(size*TICKS);
-        proximal=malloc(sizeof(proximal[0])*size*8);
-
-    }
-   
-    if (!region->inputMap[dir])
-    {
-        int samples=width*height*words*bits;
-        region->fanout=((D*D*D*D*F)/samples)+1; // at least F samples per region-columns
-        region->inputMap[dir]=malloc(samples*region->fanout);
-
-    }
-   
-    BZERO(region->node[x][y].col_input);
-
-    LOOP(width,x) LOOP(height,y) LOOP(words,w) LOOP(bits,b)
-
-
-        BZERO(region->node[x][y].col_input);
-    LOOP(d1,x) LOOP(d2,y) LOOP(F,fanout)
-    {
-        c=getc(stdin); // just bottom-up for now
-        LOOP(8,bit)
-            (region->column+(region->inputMap[x+bit][y][fanout]))->input += (c>>bit)&1;
-    }
-}
-
-void region_propagate(Region *region)
-{
-    int nx,ny,x,y,z,ix,iy,iz;
-    float cell[D][D] [D][D][D];
-    Seed seed=region->seed;
-
-   
-    // predicting?
-    LOOP(D,nx) LOOP(D,ny)
-        LOOP(D,x) LOOP(D,y) LOOP(D,z)
-        LOOP(D,ix) LOOP(D,iy) LOOP(D,iz)
-        if (region->cell_active[nx][ny][z]&DIM2(x,y))
-            cell[nx][ny][x][y][z]+=SYNAPSE[nx][ny][x][y][z][ix][iy][iz];
-
-    // sensitized?
-    // go through inputs bit by bit, setting cols using _repeating_ "random" series
-
+    Seed seed=(Seed) region;
+        
+    BZERO(region);
+    LOOP(D*D*D*D*D*D*D*D,i) region->dist+i=DRAND(seed); // full mesh between cells
+    map_init(region->prox,inputbits);
 }
 
 void region_update(Region *region)
 {
-    int nx,ny,x,y,z,x2,y2,z2,fanout;
+    int nx,ny,x,y,z,ix,iy,iz;
+    int i,bit,fan,input;
+    int cel[D][D] [D][D][D];
+    int col[D][D] [D][D];
+    int strongest;
+    Seed seed=region->seed;
+    int colmask=D*D*D*D-1;
+
+    bzero(cel);
+    bzero(col);
+    
+    // feed-forward input
+    seed=(Seed) &region->prox;
+    input=0;
+    LOOP(region->inputsize,i)
+    {
+        c=getc();
+        LOOP(8,bit)
+        {
+            LOOP(F,fan)
+            {
+                column=LRAND(seed)&colmask;
+                if ((c&1) && (map->strength[input] * (region->col_bias)+column)>CONNECTED)
+                    (col+column)++;
+            }
+            c>>=1;
+        }
+    }
+
+    // predicting?
+    LOOP(D,nx) LOOP(D,ny) LOOP(D,x) LOOP(D,y) LOOP(D,z) LOOP(D,ix) LOOP(D,iy) LOOP(D,iz)
+        if (GETBIT(region->cell_active[TICK(-1)][nx][ny],x,y,z) &&
+            (SYNAPSE[nx][ny][x][y][z][ix][iy][iz] * region->col_bias[nx][ny][x][y])>CONNECTED)
+            cel[nx][ny][x][y][z]++;
+
+    // activate cells
+    LOOP(D,nx) LOOP(D,ny) LOOP(D,x) LOOP(D,y) LOOP(D,z)
+        if (cel[nx][ny][x][y][z]>ACTIVE)
+        {
+            SETBIT(region->cell_active[TICK(0)][nx][ny],x,y,z);
+            col[nx][ny][x][y]++;
+        }
+
+    // activate strongest column
     LOOP(D,nx) LOOP(D,ny)
     {
-        // pick winning column
+        strongest=ACTIVE;
         LOOP(D,x) LOOP(D,y)
-            // adjust synapses
-            LOOP(D,x) LOOP(D,y) region->column[nx][ny][x][y].bias++;
-        (region->column[nx][ny]+activeColumn)->bias=;
+            if (col[nx][ny][x][y]>strongest)
+                SETBIT(region->col_active[TICK(0)][nx][ny],0,x,y); // not quite random
     }
+
+    LOOP(D,nx) LOOP(D,ny) LOOP(D,x) LOOP(D,y)
+        if (GETBIT(region->col_active[TICK(0)][nx][ny],0,x,y))
+        {
+            region->col_bias[nx][ny][x][y]-=16;
+            if (!GETNIB(region->cell_active[TICK(0)][nx][ny],x,y))
+                SETNIB(region->cell_active[TICK(0)][nx][ny],x,y,0xf);
+        }
+        else region->col_bias[nx][ny][x][y]++;
+    
+    // update synapses
 }
 
 void region_output(Region *region)
 {
-    printf("%llx",region->col_output);
+    printf("%llx",region->col_active);
+    
+}
+
+void region_tick(Region *region)
+{
+    cycles++;
+    bzero(region->col_active[TICK(0)]);
+    bzero(region->cell_active[TICK(0)]);
 }
 
 void iterate()
-
 {
-    while (region_input(&region) &&
-           region_propagate(&region) &&
-           region_update(&region) &&
-           region_output(&region))
-        cycles++;
+    region_input(&region);
+    region_update(&region);
+    region_output(&region);
+    region_tick(&region);
 }
 
 
+#include <stdlib.h>
+#include <stdio.h>
+#include <GL/gl.h>
+#include <GL/glu.h>
+#include <GL/freeglut.h>
 
-int gwidth=200,gheight=200;
-
+int gwidth=400,gheight=400;
 
 // here's a few hardcoded RGBA color values
 #define R 0xf30f
@@ -168,12 +178,16 @@ int gwidth=200,gheight=200;
 #define G 0x5c6c
 #define B 0x111f
 
+float camera[] = { 0,2,0 };
+float center[] = { 0,0,-1 };
+float viewup[] = { 0,1,0 };
+
+
 int main(int argc, char **argv)
 {
     unsigned int t=0;
-   
+    
     unsigned short tex[] = {
-
         X,X,X,B,B,B,B,B,B,B,B,B,B,X,X,X,
         X,X,B,B,W,W,W,W,W,W,W,W,B,B,X,X,
         X,X,B,W,W,W,W,W,W,W,W,W,W,B,X,X,
@@ -208,50 +222,65 @@ int main(int argc, char **argv)
         X,X,X,X,X,B,B,B,B,B,B,X,X,X,X,X,
     };
 
-    void texture(int id,unsigned short *data)
+    void texture(int id,int w,int h,unsigned short *data)
     {
         glBindTexture(GL_TEXTURE_2D, id);
-        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA4, 16, 16, 0, GL_RGBA, GL_UNSIGNED_SHORT_4_4_4_4, data);
-
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA4, w, h, 0, GL_RGBA, GL_UNSIGNED_SHORT_4_4_4_4, data);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
     }
 
-    void display()
+    void display_quad(float z)
     {
         glEnable(GL_LIGHTING);
+        glEnable(GL_LIGHT0);
         glEnable(GL_TEXTURE_2D);
         glBindTexture(GL_TEXTURE_2D,0);
-
         glBegin(GL_QUADS);
-        glTexCoord2f(0, 0); glVertex2f(-1,-1);
-        glTexCoord2f(1, 0); glVertex2f(1,-1);
-        glTexCoord2f(1, 1); glVertex2f(1,1);
-        glTexCoord2f(0, 1); glVertex2f(-1,1);
+        glTexCoord2f(0,0); glVertex3f(-1,-1,z);
+        glTexCoord2f(16,0); glVertex3f(1,-1,z);
+        glTexCoord2f(16,16); glVertex3f(1,1,z);
+        glTexCoord2f(0,16); glVertex3f(-1,1,z);
         glEnd();
         glDisable(GL_TEXTURE_2D);
         glDisable(GL_LIGHTING);
-
+    }
+ 
+    void display_line(float z1,float z2)
+    {
         glBegin(GL_LINES);
-        glColor3f(1,0,0);
-        glVertex2f(-1,-1);
-        glColor3f(0,1,0);
-        glVertex2f(1,1);
+        glColor3f(1,0,0); glVertex3f(-1,-1,z1);
+        glColor3f(0,1,0); glVertex3f(1,1,z2);
         glEnd();
+    }
+ 
+    void display()
+    {
+        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+        glLoadIdentity();
+        gluLookAt(camera[0],camera[1],camera[2],
+                  center[0],center[1],center[2],
+                  viewup[0],viewup[1],viewup[2]);
+        //glScalef (1.0, 1.0, 1.0);      /* modeling transformation */
+        display_quad(-2.0);
+        display_line(-2.0,-1.0);
+        display_quad(-1.0);
+        glFlush();
     }
  
     void reshape(int w,int h)
     {
+        float r=w>h?(float) w/(float) h:(float) h/(float) w;
         gwidth=w;
         gheight=h;
-        // change view to screen coordinates
-        //glViewport(0,0,(GLsizei) w,(GLsizei) h);
-        //glMatrixMode(GL_PROJECTION);
-        //glLoadIdentity();
-        //glOrtho(0,w,0,h,-1.0,1.0);
-        //glMatrixMode(GL_MODELVIEW);
+        glViewport(0,0,(GLsizei) w,(GLsizei) h);
+        glMatrixMode(GL_PROJECTION);
+        glLoadIdentity();
+        if (w>h) glFrustum (-r,r,-1.0,1.0,0.5,20.0);
+        else     glFrustum (-1.0,1.0,-r,r,0.5,20.0);
+        glMatrixMode(GL_MODELVIEW);
     }
-   
+    
     void keyboard(unsigned char key,int x,int y)
     {
         switch (key)
@@ -260,9 +289,9 @@ int main(int argc, char **argv)
             case '1': t++; break;
             case '2': t--; break;
         }
-        texture(0,tex+(16*(t%16)));
+        texture(0,16,16,tex+(16*(t%16)));
     }
-   
+    
     void mouse(int button,int state,int x,int y) { printf("%d,%d,%d,%d\n",button,state,x,y); }
     void motion(int x,int y) { printf("%d,%d\n",x,y); }
 
@@ -270,8 +299,9 @@ int main(int argc, char **argv)
     {
         glutPostRedisplay();
         glutSwapBuffers();
+        sleep(1);
     }
-   
+    
     void menuselect(int id)
     {
         switch (id)
@@ -279,7 +309,7 @@ int main(int argc, char **argv)
             case 0: exit(0); break;
         }
     }
-   
+    
     int menu(void)
     {
         int menu=glutCreateMenu(menuselect);
@@ -293,28 +323,24 @@ int main(int argc, char **argv)
     glutInitWindowPosition(100,100);
     glutInitWindowSize(gwidth,gheight);
     glutCreateWindow("HTM");
-   
+    
     glutDisplayFunc(display);
-    //glutReshapeFunc(reshape);
+    glutReshapeFunc(reshape);
     glutKeyboardFunc(keyboard);
     glutMouseFunc(mouse);
     glutMotionFunc(motion);
     glutIdleFunc(idle);
-   
+    
     menu();
     glutAttachMenu(GLUT_RIGHT_BUTTON);
 
     glEnable(GL_DEPTH_TEST);
     glDepthFunc(GL_LEQUAL);
     glShadeModel(GL_SMOOTH);
-    glEnable(GL_LIGHT0);
-    glEnable(GL_TEXTURE_2D);
-    //glEnable(GL_LINE_SMOOTH);
-    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
-    //reshape(gwidth,gheight);
-    texture(0,tex);
-
+    reshape(gwidth,gheight);
+    texture(0,16,16,tex);
+    
     glutMainLoop();
     return 0;
 }
