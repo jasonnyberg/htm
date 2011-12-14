@@ -1,10 +1,14 @@
+#include <stdlib.h>
+#include <stdio.h>
+#include <GL/glut.h>
+
+
 #define PROX_THRESH 0.5
 #define DIST_THRESH 0.5
 
 int cycles=0;
 #define TICKS 2
 #define TICK(t) ((cycles-(t))%TICKS)
-
 
 int I=16; // input 2d dimension
 int F=8;  // input->column fanout
@@ -16,32 +20,27 @@ typedef long long Bits64;
 typedef char Coarse;
 typedef float Fine;
 
-static long long bit1=1;
-static long long DMASK[D*D] = { 0xf<<0x0, 0xf<<0x1, 0xf<<0x2, 0xf<<0x3,
-                                0xf<<0x4, 0xf<<0x5, 0xf<<0x6, 0xf<<0x7,
-                                0xf<<0x8, 0xf<<0x9, 0xf<<0xa, 0xf<<0xb,
-                                0xf<<0xc, 0xf<<0xd, 0xf<<0xe, 0xf<<0xf };
-
-
 #define RAND(bits,mask) ((rand()>>(31-bits)) & (mask))
 
-#define BIT(b) (1<<(b))
-#define BIT2D(x,y) (1<<(x)<<D<<(y))
-#define BIT3D(x,y,z) (1<<(x)<<D<<(y)<<D<<(z))
+#define BIT0 = ((long long) 1)
+#define NIB0 = ((long long) 0xf)
 
-#define GETB(bits,mask) ((bits)&(mask))
-#define SETB(bits,mask) ((bits)|=(mask))
-#define CLRB(bits,mask) ((bits)&=~(mask))
+#define DIM2(x,y) (((x)*D)|(y))
+#define DIM3(x,y,z) DIM2(DIM2((x),(y)),(z))
 
-#define SETNIB16(bits,val) ((bits)=(bits)&
-#define GETNIB16(bits,val) ((val)=(bits)&DMASK[],(bits)>>D
+#define GETBIT(bits,x,y,z) (((bits)&(BIT0<<(DIM3((x),(y),(z)))))!=0)
+#define SETBIT(bits,x,y,z) ((bits)|=(BIT0<<(DIM3((x),(y),(z)))))
+#define CLRBIT(bits,x,y,z) ((bits)&=~(BIT0<<(DIM3((x),(y),(z)))))
+
+#define GETNIB(bits,x,y) (((bits)>>(DIM3((x),(y),0)))&NIB0)
+#define SETNIB(bits,x,y,val) ((bits)=((bits)&~(NIB0<<(DIM3((x),(y),0)))) | ((bits)|(((val)&NIB0)<<(DIM3((x),(y),0)))))
+
 
 
 typedef struct
 {
     Bits cell_active[TICKS];
     Bits cell_predicting[TICKS];
-
     Coarse potential;
     Coarse bias;
     Coarse input;
@@ -49,27 +48,38 @@ typedef struct
 
 typedef struct
 {
-    Bits column_active[TICKS];
+    Bits col_output[TICKS];
 
     Column column [D][D] [D][D]; // node  (xy)(column(xy))
     Coarse synapse[D][D] [D][D][D] [D][D][D]; // permanence from node(xy)(cell(xyz),cell(xyz))
-    unsigned short inputMap[I][I][F]; // input(xy)(fanout) is index into node(xy)(colum(xy))
+    unsigned short *inputMap[6]; // create maps (one per cube face) to fan inputs to F * column(nx,ny,cx,cy)
+    char fanout;
 } Region;
 
-#define LOOP(r,v) for (v=0;v<D;v++)
+#define LOOP(r,v) for ((v)=0;(v)<(r);(v)++)
+
 
 #define COLUMN(nx,ny,x,y) (region->column[nx][ny][x][y])
 #define SYNAPSE(nx,ny,sx,sy,sz,dx,dy,dz) (region->cell[nx][ny][sx][sy][sz][dx][dy][dz])
 
-
-void region_input(Region *region)
+void region_input(Region *region,int dir,int x,int y,int words,int bits)
 {
-    int x,y,fanout,bit;
+    int w,x,y,z,fanout,bit;
     char c;
+
+    if (!region->inputMap[dir])
+    {
+        int samples=x*y*words*bits;
+       
+       
+        region->inputMap[dir]=malloc(sizeof(short)*(((samples/(D*D*D*D))+1)*F)); // ~F samples per region's column
+
+    }
    
     LOOP(D,x) LOOP(D,y) BZERO(region->node[x][y].col_input);
    
-    LOOP(I/8,x) LOOP(I,y) LOOP(F,fanout)
+    LOOP(d1,x) LOOP(d2,y) LOOP(F,fanout)
+
     {
         c=getc(stdin); // just bottom-up for now
         LOOP(8,bit)
@@ -82,7 +92,6 @@ void region_propagate(Region *region)
     int nx,ny,x,y,z,ix,iy,iz;
 
     // predicting?
-
     LOOP(D,nx) LOOP(D,ny)
         LOOP(D,x) LOOP(D,y)
     {
@@ -91,7 +100,6 @@ void region_propagate(Region *region)
         LOOP(D,ix) LOOP(D,iy) LOOP(D,iz)
             if (COLUMN(nx,ny,x,y).active[ * SYNAPSE(nx,ny,x,y,z,ix,iy,iz) > DIST_THRESH)
                 CELL(nx,ny,x,y,z).predicting++;
-
                 }
         }
        
@@ -157,4 +165,125 @@ void iterate()
            region_update(&region) &&
            region_output(&region))
         cycles++;
+}
+
+
+
+
+ 
+
+// here's a few hardcoded RGBA color values
+#define R 0xf30f
+#define W 0xffff
+#define X 0x0000
+#define G 0x5c6c
+#define B 0x111f
+
+int t=0;
+
+unsigned short tex[2][(16 * 16)] = {
+    {
+        X,X,X,B,B,B,B,B,B,B,B,B,B,X,X,X,
+        X,X,B,B,W,W,W,W,W,W,W,W,B,B,X,X,
+        X,X,B,W,W,W,W,W,W,W,W,W,W,B,X,X,
+        X,B,B,W,W,W,R,W,W,R,W,W,W,B,B,X,
+        B,B,B,B,W,W,R,W,W,R,W,W,B,B,B,B,
+        B,W,W,B,B,B,B,B,B,B,B,B,B,W,W,B,
+        B,W,W,W,W,W,G,G,G,G,W,W,W,W,W,B,
+        B,G,G,W,W,G,G,G,G,G,G,W,W,G,G,B,
+        B,G,G,G,W,G,G,G,G,G,G,W,G,G,G,B,
+        B,G,G,G,W,G,G,G,G,G,G,W,G,G,G,B,
+        B,B,G,G,W,W,G,G,G,G,W,W,G,G,B,B,
+        X,B,G,W,W,W,W,W,W,W,W,W,W,G,B,X,
+        X,B,B,W,G,G,W,W,W,W,G,G,W,B,B,X,
+        X,X,B,B,G,G,G,W,W,G,G,G,B,B,X,X,
+        X,X,X,B,B,B,G,W,W,G,B,B,B,X,X,X,
+        X,X,X,X,X,B,B,B,B,B,B,X,X,X,X,X,
+    },
+    {
+        X,X,X,X,X,B,B,B,B,B,B,X,X,X,X,X,
+        X,X,X,B,B,B,G,W,W,G,B,B,B,X,X,X,
+        X,X,B,B,G,G,G,W,W,G,G,G,B,B,X,X,
+        X,B,B,W,G,G,W,W,W,W,G,G,W,B,B,X,
+        X,B,G,W,W,W,W,W,W,W,W,W,W,G,B,X,
+        B,B,G,G,W,W,G,G,G,G,W,W,G,G,B,B,
+        B,G,G,G,W,G,G,G,G,G,G,W,G,G,G,B,
+        B,G,G,G,W,G,G,G,G,G,G,W,G,G,G,B,
+        B,G,G,W,W,G,G,G,G,G,G,W,W,G,G,B,
+        B,W,W,W,W,W,G,G,G,G,W,W,W,W,W,B,
+        B,W,W,B,B,B,B,B,B,B,B,B,B,W,W,B,
+        B,B,B,B,W,W,R,W,W,R,W,W,B,B,B,B,
+        X,B,B,W,W,W,R,W,W,R,W,W,W,B,B,X,
+        X,X,B,W,W,W,W,W,W,W,W,W,W,B,X,X,
+        X,X,B,B,W,W,W,W,W,W,W,W,B,B,X,X,
+        X,X,X,B,B,B,B,B,B,B,B,B,B,X,X,X,
+    }
+};
+
+ 
+void init()
+{
+    glEnable(GL_TEXTURE_2D);
+    //glDisable(GL_TEXTURE_2D);
+   
+    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+   
+    glBindTexture(GL_TEXTURE_2D, 0);   
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA4, 16, 16, 0, GL_RGBA, GL_UNSIGNED_SHORT_4_4_4_4,tex[0]);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+   
+    glBindTexture(GL_TEXTURE_2D, 1);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA4, 16, 16, 0, GL_RGBA, GL_UNSIGNED_SHORT_4_4_4_4,tex[1]);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+}
+
+void display()
+{
+    //glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+    //glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    //glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glBindTexture(GL_TEXTURE_2D,t);
+    glBegin(GL_QUADS);
+    glTexCoord2f(0, 0); glVertex2f(-1,-1);
+    glTexCoord2f(1, 0); glVertex2f(1,-1);
+    glTexCoord2f(1, 1); glVertex2f(1,1);
+    glTexCoord2f(0, 1); glVertex2f(-1,1);
+    glEnd();
+}
+
+void keyboard(unsigned char key, int x, int y)
+{
+    switch (key)
+    {
+        case 27: // ESCAPE key
+            exit(0);
+            break;
+        case '1':
+            t=0;
+            break;
+        case '2':
+            t=1;
+            break;
+    }
+}
+
+void idle()
+{
+    glutPostRedisplay();
+    glutSwapBuffers();
+}
+
+int main(int argc, char **argv) {
+    glutInit(&argc, argv);
+    glutInitDisplayMode(GLUT_DEPTH | GLUT_SINGLE | GLUT_RGBA);
+    glutInitWindowPosition(100,100);
+    glutInitWindowSize(320,320);
+    glutCreateWindow("HTM");
+    init();
+    glutDisplayFunc(display);
+    glutKeyboardFunc(keyboard);
+    glutIdleFunc(idle);
+    glutMainLoop();
 }
