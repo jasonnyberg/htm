@@ -66,8 +66,8 @@ typedef enum { ACTIVE=1,PREDICTED=2,IMAGINED=4 } HTM_STATE;
 int cycles=0;
 Seed gseed={{},NULL,NULL};
 
-int show_cells=0;
-int show_dendrites=0;
+int show_cells=1;
+int show_dendrites=1;
 int show_map=0;
 int show_scores=0;
 int show_suppression=0;
