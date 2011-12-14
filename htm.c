@@ -10,13 +10,15 @@
 #define DENDRITE_CACHE 0x1000
 #define SYNAPSES 32
 
+#define NOISE_FACTOR 20
 #define INIT_BIAS_RANGE 5
 #define INIT_PERMANENCE_RANGE 8
 #define IS_ACTIVE 0x80
 #define SYNAPSE_ADJUSTMENT 10
-#define MAX_CHAR 0x7f
-#define MIN_CHAR 0x80
+#define MAX_CHAR 0xff
+#define MIN_CHAR 0x00
 
+#define PTHRESH 0x80
 #define DTHRESH 2 // (interface->depth/8+1)
 #define ATHRESH 2 // (region->dendrites/8+1)
 
@@ -28,8 +30,9 @@
 
 typedef struct { unsigned short s[0]; void *d1; void *d2; } Seed;
 #define RESEED(seed,ptr) (seed.d1=seed.d2=ptr,seed.s)
-#define LRAND(seed) (nrand48(seed.s))
-#define DRAND(seed) (erand48(seed.s))
+#define NRAND(seed) (nrand48(seed.s)) // 0 through 2^31
+#define JRAND(seed) (jrand48(seed.s)) // -2^31 through 2^31
+#define ERAND(seed) (erand48(seed.s)) // 0.0 through 1.0
 
 
 typedef struct { int v[0]; int x,y,z,vol; } D3;
@@ -38,6 +41,9 @@ typedef struct { int v[0]; int x,y,z,vol; } D3;
 #define DIM3(x,y,z,d) ((x)*(d)[1]*(d)[2] + (y)*(d)[2] + (z))
 #define DIM3D(i,d) (((i)[3]=DIM3((i)[0],(i)[1],(i)[2],(d))),((i)[3]<0?-1:((i)[3]>(d)[3]?-1:(i)[3])))
 #define CLIP3D(i,d) (DIM3D((i),(d)),(i)[0]>=0 && (i)[0]<(d)[0] && (i)[1]>=0 && (i)[1]<(d)[1] && (i)[2]>=0 && (i)[2]<(d)[2])
+
+#define WRAP3(x,y,z,d) (((x)%=(d)[0])*(d)[1]*(d)[2] + ((y)%=(d)[1])*(d)[2] + ((z%=(d)[2])))
+#define WRAP3D(i,d) ((i)[3]=WRAP3((i)[0],(i)[1],(i)[2],(d)))
 
 #define LOOP(i,from,to) for ((i)=(from);(i)<(to);(i)++)
 #define ZLOOP(i,lim) LOOP((i),0,lim)
@@ -75,7 +81,7 @@ int show_risers=1;
  */
 typedef struct
 {
-    char permanence;
+    unsigned char permanence;
 } Synapse;
 
 typedef struct
@@ -149,14 +155,14 @@ void DendriteMap_init()
     void generate()
     {
         int synapse;
-        unsigned long long r=LRAND(gseed);
+        unsigned long long r=NRAND(gseed);
         int v[]={1,(r&0x10000000)?1:-1};
         int xx=(r&0x2000000)?1:-1; // flip l/r
         int xy=(r&0x4000000)?1:0; // switch axes
         int mx[]={6,2};
 
         r<<=31;
-        r|=LRAND(gseed);
+        r|=NRAND(gseed);
         BZERO(DENDRITEMAP(i));
         
         LOOP(synapse,1,SYNAPSES)
@@ -212,12 +218,10 @@ int Interface_init(Interface *interface,StateMap *input,StateMap *output,int bre
         interface->dendrites[i].dendrite=malloc(breadth*sizeof(Dendrite));
         ZLOOP(d,breadth)
         {
-            interface->dendrites[i].dendrite[d].sensitivity=(unsigned char) LRAND(gseed)>>12;
+            interface->dendrites[i].dendrite[d].sensitivity=(unsigned char) NRAND(gseed)>>12;
             interface->dendrites[i].dendrite[d].synapse=malloc(depth*sizeof(Synapse));
             ZLOOP(s,depth)
-            {
-                interface->dendrites[i].dendrite[d].synapse[s].permanence=LRAND(gseed)%INIT_PERMANENCE_RANGE-(INIT_PERMANENCE_RANGE>>1);
-            }
+                interface->dendrites[i].dendrite[d].synapse[s].permanence=PTHRESH;
         }
     }
     return 0;
@@ -316,7 +320,7 @@ int Interface_traverse(Interface *interface,Synapse_op op)
         (void) DIM3D(opos.v,interface->output->size.v); // populate opos.vol
         ZLOOP(d,interface->breadth)
         {
-            random=LRAND(seed); random>>=4;
+            random=NRAND(seed); random>>=4;
             ipos.x=(int) (opos.x*delta.x)+(random%fanout.x); random>>=4;
             ipos.y=(int) (opos.y*delta.y)+(random%fanout.y); random>>=4;
             map=DENDRITEMAP(random);
@@ -337,28 +341,55 @@ int Interface_traverse(Interface *interface,Synapse_op op)
 
 int Interface_score(Interface *interface,int predictive)
 {
+    int stoch_perm(p)
+    {
+        int d=ABS(PTHRESH-p); // distance from pthresh
+        int di=PTHRESH-d; // invert the "V"
+        int dis=di/NOISE_FACTOR+1; // scale it
+        return p+(JRAND(gseed)%dis); // add noise to permancence that gets greater closer to threshold
+    }
+    
     int synapse_op(D3 *ipos,D3 *opos,int dendrite,int synapse)
     {
         Dendrites *dens=&interface->dendrites[opos->vol];
         Dendrite *den=&dens->dendrite[dendrite];
         Synapse *syn=&den->synapse[synapse];
-        
+        int in_active,out_active;
+
         if (synapse==0)
         {
             den->score=0;
             if (interface->input==interface->output) return 0; // don't let cell use itself as input
         }
-        
+
         if (CLIP3D(ipos->v,interface->input->size.v))
         {
-            if (syn->permanence > 0)
+            if (stoch_perm(syn->permanence) >= PTHRESH)
             {
-                if (interface->input->active[ipos->vol] > den->sensitivity+dens->bias)
-                    den->score+=1;
-                if (interface->input->predict[ipos->vol] > den->sensitivity+dens->bias)
+                in_active=interface->input->active[ipos->vol] > den->sensitivity+dens->bias;
+                out_active=interface->output->active[ipos->vol] & IS_ACTIVE;
+                
+                if (predictive)
+                {
+                    in_active = in_active || interface->input->predict[ipos->vol] > den->sensitivity+dens->bias;
+                    out_active = out_active && interface->output->predict[ipos->vol] & IS_ACTIVE;
+                }
+                
+                if (in_active /* && out_active */)
                     den->score+=1;
             }
         }
+
+        //if (CLIP3D(ipos->v,interface->input->size.v))
+        //{
+        //    if (stoch_perm(syn->permanence) >= PTHRESH)
+        //    {
+        //        if (interface->input->active[ipos->vol] > den->sensitivity+dens->bias)
+        //            den->score+=1;
+        //        if (interface->input->predict[ipos->vol] > den->sensitivity+dens->bias)
+        //            den->score+=1;
+        //    }
+        //}
         
         if (synapse==interface->depth-1)
             if (den->score >= DTHRESH)
@@ -393,8 +424,8 @@ int Interface_adjust(Interface *interface,int predictive)
 {
     Synapse *syn;
 
-#define INC(x,y) ((x)=MIN((unsigned)(x)+(unsigned)(y),MAX_CHAR))
-#define DEC(x,y) ((x)=MAX((unsigned)(x)+(unsigned)(y),MIN_CHAR))
+#define INC(x,y) ((x)=MIN((x)+(y),MAX_CHAR))
+#define DEC(x,y) ((x)=MAX((x)+(y),MIN_CHAR))
     
     int synapse_op(D3 *ipos,D3 *opos,int dendrite,int synapse)
     {
@@ -403,19 +434,18 @@ int Interface_adjust(Interface *interface,int predictive)
         Synapse *syn=&den->synapse[synapse];
         int adj=SYNAPSE_ADJUSTMENT;
         int in_active,out_active;
-        int in_predict,out_predict;
 
-        if (dendrite==0 && synapse==0)
-        {
-            if (interface->output->active[opos->vol]==0x00 || interface->output->predict[opos->vol]==0x00)
-                INC(dens->bias,1);
-            if (interface->output->active[opos->vol]==0xff || interface->output->predict[opos->vol]==0xff)
-                DEC(dens->bias,1);
-        }
+        //if (dendrite==0 && synapse==0)
+        //{
+        //    if (interface->output->active[opos->vol]==0x00 || interface->output->predict[opos->vol]==0x00)
+        //        INC(dens->bias,1);
+        //    if (interface->output->active[opos->vol]==0xff || interface->output->predict[opos->vol]==0xff)
+        //        DEC(dens->bias,1);
+        //}
         
         if (interface->input==interface->output && synapse==0) return 0; // don't let cell use itself as input
     
-        if (!CLIP3D(ipos->v,interface->input->size.v))
+        if (CLIP3D(ipos->v,interface->input->size.v))
         {
             in_active=interface->input->active[ipos->vol] > den->sensitivity+dens->bias;
             out_active=interface->output->active[ipos->vol] & IS_ACTIVE;
@@ -618,9 +648,9 @@ int main(int argc, char **argv)
                     if (synapse==0)
                     {
                         int dscore=interface->dendrites[opos->vol].dendrite[dendrite].score >= DTHRESH;
-                        int sscore=interface->dendrites[opos->vol].dendrite[dendrite].synapse[synapse].permanence;
+                        int perm=interface->dendrites[opos->vol].dendrite[dendrite].synapse[synapse].permanence;
                         show=(i==FEEDFWD && show_predictions) || dscore;
-                        glColor4f(show_active?active/255.0:0,show_predictions?predict/255.0:0,sscore>0?sscore/127.0:0,(sscore+127.0)/255.0);
+                        glColor4f(show_active?active/255.0:0,show_predictions?predict/255.0:0,perm>-PTHRESH?perm/255.0:0,perm/255.0);
 
                         glBegin(GL_LINE_STRIP);
                         ZLOOP(axis,3) vertex.v[axis]=opos->v[axis]+interface->output->position.v[axis];
@@ -697,7 +727,7 @@ int main(int argc, char **argv)
             glColor4f(1,1,1,.01);
             ZLOOP(d,dendrites)
             {
-                map=dendrites==DENDRITE_CACHE?DENDRITEMAP(d):DENDRITEMAP(LRAND(gseed)>>12);
+                map=dendrites==DENDRITE_CACHE?DENDRITEMAP(d):DENDRITEMAP(NRAND(gseed)>>12);
                 p=z;
                 glBegin(GL_LINE_STRIP);
                 glVertex3iv(p.v);
