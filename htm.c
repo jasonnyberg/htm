@@ -11,11 +11,11 @@
 #define SYNAPSES 32
 
 #define INIT_BIAS_RANGE 5
-#define INIT_PERMANENCE_RANGE 20
+#define INIT_PERMANENCE_RANGE 8
 #define IS_ACTIVE 0x80
 #define SYNAPSE_ADJUSTMENT 1
-#define MAX_CHAR 0x7f
-#define MIN_CHAR 0x80
+#define MAX_CHAR 0x7e
+#define MIN_CHAR 0x81
 
 #define DTHRESH depth/4
 #define ATHRESH 2 // region->dendrites/4
@@ -82,7 +82,7 @@ typedef struct
 {
     Synapse *synapse;
     unsigned char sensitivity;
-    unsigned char score;
+    short score;
 } Dendrite;
 
 typedef struct
@@ -351,10 +351,10 @@ int Interface_score(Interface *interface)
         if (CLIP3D(ipos->v,interface->input->size.v))
         {
             if (syn->permanence > 0)
-                if (den->sensitivity+dens->bias>=interface->input->active[ipos->vol])
-                    interface->dendrites[opos->vol].dendrite[dendrite].score+=1;
-                if (den->sensitivity+dens->bias>=interface->input->predict[ipos->vol])
-                    interface->dendrites[opos->vol].dendrite[dendrite].score+=1;
+                if (interface->input->active[ipos->vol] >= den->sensitivity+dens->bias)
+                    den->score+=1;
+                if (interface->input->predict[ipos->vol] >= den->sensitivity+dens->bias)
+                    den->score+=1;
         }
         
         if (synapse==interface->depth-1)
@@ -402,9 +402,9 @@ int Interface_adjust(Interface *interface)
 
         if (dendrite==0 && synapse==0)
         {
-            if (interface->output->active[opos->vol]==0x00)
+            if (interface->output->active[opos->vol]==0x00 || interface->output->predict[opos->vol]==0x00)
                 INC(dens->bias,1);
-            else if (interface->output->active[opos->vol]==0xff)
+            if (interface->output->active[opos->vol]==0xff || interface->output->predict[opos->vol]==0xff)
                 DEC(dens->bias,1);
         }
         
@@ -446,7 +446,7 @@ int Region_update(Region *region)
         // age active states
         ZLOOP(i,region->states.size.vol)
         {
-            region->states.active[i]>>=1;
+            region->states.active[i]>>=4;
             region->states.score[i]=0;
             region->states.suppression[i]=0;
         }
@@ -454,6 +454,8 @@ int Region_update(Region *region)
         // propagate inputs
         //ZLOOP(i,INTERFACES) Interface_score(&region->interface[i]);
         Interface_score(&region->interface[FEEDFWD]);
+        Interface_score(&region->interface[INTRA]);
+        Interface_score(&region->interface[FEEDBACK]);
         
         // calculate suppression
         Interface_suppress(&region->interface[INTRA]);
@@ -465,7 +467,6 @@ int Region_update(Region *region)
 
         // update synapses
         ZLOOP(interface,INTERFACES) Interface_adjust(&region->interface[interface]);
-
         
 
         // age predictive states
@@ -485,9 +486,9 @@ int Region_update(Region *region)
         Interface_suppress(&region->interface[INTRA]);
         
         // activate sufficiently post-supporession stimulated cells;
-        //ZLOOP(i,region->states.size.vol)
-        //    if ((region->states.score[i]-region->states.suppression[i]) > ATHRESH)
-        //        region->states.predict[i]|=IS_ACTIVE;
+        ZLOOP(i,region->states.size.vol)
+            if ((region->states.score[i]-region->states.suppression[i]) > ATHRESH)
+                region->states.predict[i]|=IS_ACTIVE;
     }
     else // an input layer... read from stdin
     {
