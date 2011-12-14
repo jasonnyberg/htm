@@ -61,7 +61,7 @@ typedef struct { cvec offset[SYNAPSES]; } DendriteMap;
 DendriteMap gDendriteMap[DENDRITE_CACHE];
 #define DENDRITEMAP(i) (gDendriteMap[(i)%DENDRITE_CACHE])
 
-typedef enum { ACTIVE=1,PREDICTED=2,IMAGINED=4 } HTM_MAP;
+typedef enum { ACTIVE=1,PREDICTED=2,IMAGINED=4 } HTM_STATE;
 
 int cycles=0;
 Seed gseed={{},NULL,NULL};
@@ -293,7 +293,7 @@ int Htm_init(Htm *htm,RegionDesc *rd,int regions)
  * Processing
  *
  */
-typedef int (*Synapse_op)(D3 *ipos,D3 *opos,int dendrite,int synapse);
+typedef int (*Synapse_op)(D3 *ipos,D3 *opos,int dendrite,int synapse,DendriteMap *map);
 
 int Interface_traverse(Interface *interface,Synapse_op op)
 {
@@ -331,7 +331,7 @@ int Interface_traverse(Interface *interface,Synapse_op op)
                 ipos.x+=map.offset[s].x;
                 ipos.y+=map.offset[s].y;
                 ipos.z=map.offset[s].z%interface->input->size.z;
-                if ((status=op(&ipos,&opos,d,s)))
+                if ((status=op(&ipos,&opos,d,s,&map)))
                     goto done;
             }
         }
@@ -347,7 +347,7 @@ int Interface_suppress(Interface *interface)
     
 #define SUPPRESSION ((synapses-synapse)/synapses)
 
-    int synapse_op(D3 *ipos,D3 *opos,int dendrite,int synapse)
+    int synapse_op(D3 *ipos,D3 *opos,int dendrite,int synapse,DendriteMap *map)
     {
         if (synapse>0 && CLIP3D(ipos->v,interface->input->size.v))
             interface->input->suppression[ipos->vol] += interface->output->score[opos->vol] * SUPPRESSION;
@@ -372,9 +372,9 @@ int Interface_suppress(Interface *interface)
 /********************************************************************************************/
 /********************************************************************************************/
 
-int Interface_score(Interface *interface,HTM_MAP map)
+int Interface_score(Interface *interface,HTM_STATE state)
 {
-    int synapse_op(D3 *ipos,D3 *opos,int dendrite,int synapse)
+    int synapse_op(D3 *ipos,D3 *opos,int dendrite,int synapse,DendriteMap *map)
     {
         Dendrites *dens=&interface->dendrites[opos->vol];
         Dendrite *den=&dens->dendrite[dendrite];
@@ -395,11 +395,11 @@ int Interface_score(Interface *interface,HTM_MAP map)
         {
             if (syn->permanence+sp > PTHRESH)
             {
-                if (map&ACTIVE && interface->input->active[ipos->vol] > den->sensitivity+dens->bias)
+                if (state&ACTIVE && interface->input->active[ipos->vol] > den->sensitivity+dens->bias)
                     den->score+=1;
-                if (map&PREDICTED && interface->input->predicted[ipos->vol] > den->sensitivity+dens->bias)
+                if (state&PREDICTED && interface->input->predicted[ipos->vol] > den->sensitivity+dens->bias)
                     den->score+=1;
-                if (map&IMAGINED && interface->input->imagined[ipos->vol] > den->sensitivity+dens->bias)
+                if (state&IMAGINED && interface->input->imagined[ipos->vol] > den->sensitivity+dens->bias)
                     den->score+=1;
             }
         }
@@ -415,12 +415,12 @@ int Interface_score(Interface *interface,HTM_MAP map)
 }
 
 
-int Interface_adjust(Interface *interface,HTM_MAP map)
+int Interface_adjust(Interface *interface,HTM_STATE state)
 {
 #define INC(x,y) ((x)=MAX((x),(typeof(x)) ((x)+(y))))
 #define DEC(x,y) ((x)=MIN((x),(typeof(x)) ((x)-(y))))
     
-    int synapse_op(D3 *ipos,D3 *opos,int dendrite,int synapse)
+    int synapse_op(D3 *ipos,D3 *opos,int dendrite,int synapse,DendriteMap *map)
     {
         Dendrites *dens=&interface->dendrites[opos->vol];
         Dendrite *den=&dens->dendrite[dendrite];
@@ -432,11 +432,11 @@ int Interface_adjust(Interface *interface,HTM_MAP map)
         {
             int in_state=0,out_state=0;
             
-            if (map&ACTIVE && interface->input->active[ipos->vol])
+            if (state&ACTIVE && interface->input->active[ipos->vol])
                 in_state+=1;
-            if (map&PREDICTED && interface->input->active[ipos->vol])
+            if (state&PREDICTED && interface->input->active[ipos->vol])
                 in_state+=1;
-            if (map&IMAGINED && interface->input->imagined[ipos->vol])
+            if (state&IMAGINED && interface->input->imagined[ipos->vol])
                 in_state+=1;
             
             out_state=interface->output->active[opos->vol] & IS_ACTIVE;
@@ -456,9 +456,9 @@ int Interface_adjust(Interface *interface,HTM_MAP map)
     return Interface_traverse(interface,synapse_op);
 }
 
-int Interface_rscore(Interface *interface,HTM_MAP map)
+int Interface_rscore(Interface *interface,HTM_STATE state)
 {
-    int synapse_op(D3 *ipos,D3 *opos,int dendrite,int synapse)
+    int synapse_op(D3 *ipos,D3 *opos,int dendrite,int synapse,DendriteMap *map)
     {
         Dendrites *dens=&interface->dendrites[opos->vol];
         Dendrite *den=&dens->dendrite[dendrite];
@@ -466,14 +466,14 @@ int Interface_rscore(Interface *interface,HTM_MAP map)
         
         if (interface->input==interface->output && synapse==0) return 0; // don't let cell use itself as input
         
-        if (synapse>0 && CLIP3D(ipos->v,interface->input->size.v))
+        if (CLIP3D(ipos->v,interface->input->size.v))
             if (syn->permanence > PTHRESH)
             {
-                if (map&ACTIVE && interface->output->active[opos->vol]&IS_ACTIVE)
+                if (state&ACTIVE && interface->output->active[opos->vol]&IS_ACTIVE)
                     interface->input->score[ipos->vol]++;
-                if (map&PREDICTED && interface->output->predicted[opos->vol]&IS_ACTIVE)
+                if (state&PREDICTED && interface->output->predicted[opos->vol]&IS_ACTIVE)
                     interface->input->score[ipos->vol]++;
-                if (map&IMAGINED && interface->output->imagined[opos->vol]&IS_ACTIVE)
+                if (state&IMAGINED && interface->output->imagined[opos->vol]&IS_ACTIVE)
                     interface->input->score[ipos->vol]++;
             }
         
@@ -664,38 +664,52 @@ int main(int argc, char **argv)
                 interface=&htm.region[r].interface[i];
             
                 glColor4f(1,1,1,1);
-                if (interface && interface->output && interface->output->size.vol)
+                if (interface &&
+                    interface->output && interface->output->size.vol &&
+                    interface->input && interface->input->size.vol)
                 {
-                    GLubyte map[interface->output->size.x][interface->breadth][interface->output->size.y][interface->depth][4];
-                    D3 opos={{},0,0,0};
-                    int d,s;
+                    int size=interface->output->size.x*interface->depth*interface->output->size.y*interface->depth;
+                    GLubyte tex[interface->output->size.x][interface->depth][interface->output->size.y][interface->depth][4];
                     int active,predicted,imagined,perm,score;
                     GLubyte r,g,b,a;
                     float x,y,z,w,h;
                     
-                    BZERO(map);
-                    ZLOOP(opos.x,interface->output->size.x) ZLOOP(opos.y,interface->output->size.y)
+                    int synapse_op(D3 *ipos,D3 *opos,int dendrite,int synapse,DendriteMap *map)
                     {
-                        (void) DIM3D(opos.v,interface->output->size.v);
-                        ZLOOP(d,interface->breadth) ZLOOP(s,interface->depth)
+                        Dendrites *dens=&interface->dendrites[opos->vol];
+                        Dendrite *den=&dens->dendrite[dendrite];
+                        Synapse *syn=&den->synapse[synapse];
+                        int ix,iy,offset;
+                        
+                        if (synapse==0) ix=iy=interface->depth/2;
+                        
+                        if (CLIP3D(ipos->v,interface->input->size.v))
                         {
-                            active=interface->output->active[opos.vol];
-                            predicted=interface->output->predicted[opos.vol];
-                            imagined=interface->output->imagined[opos.vol];
-                            perm=interface->dendrites[opos.vol].dendrite[d].synapse[s].permanence;
-                            score=interface->output->score[opos.vol];
-                            r=active;
-                            g=predicted;
-                            r|=perm<PTHRESH?(PTHRESH-perm-1)*2:0;
-                            g|=perm>PTHRESH?(perm-PTHRESH)*2:0;
-                            b=imagined;
-                            a=0xff;
-                            map[opos.x][d][opos.y][s][0]=r;
-                            map[opos.x][d][opos.y][s][1]=g;
-                            map[opos.x][d][opos.y][s][2]=b;
-                            map[opos.x][d][opos.y][s][3]=a;
+                            ix+=map->offset[synapse].x;
+                            iy+=map->offset[synapse].y;
+                            active=interface->output->active[opos->vol];
+                            predicted=interface->output->predicted[opos->vol];
+                            imagined=interface->output->imagined[opos->vol];
+                            perm=syn->permanence;
+                            score=interface->output->score[opos->vol];
+                            r=perm<PTHRESH?(PTHRESH-perm-1)*2:0;
+                            g=perm>PTHRESH?(perm-PTHRESH)*2:0;
+                            b=synapse==0?0xff:0;
+                            a=r|g|b?0xff:0;
+                            offset=(opos->x+ix)*(opos->y+iy);
+                            if (offset>=0 && offset<size)
+                            {
+                                tex[opos->x][ix][opos->y][iy][0]|=r;
+                                tex[opos->x][ix][opos->y][iy][1]|=g;
+                                tex[opos->x][ix][opos->y][iy][2]|=b;
+                                tex[opos->x][ix][opos->y][iy][3]|=a;
+                            }
                         }
+                        return 0;
                     }
+
+                    BZERO(tex);
+                    Interface_traverse(interface,synapse_op);
                     
                     glPixelStorei(GL_UNPACK_ALIGNMENT, 0);
                     glBindTexture(GL_TEXTURE_2D,tid);
@@ -707,10 +721,10 @@ int main(int argc, char **argv)
                     gluBuild2DMipmaps(GL_TEXTURE_2D,
                                       GL_RGBA,
                                       interface->output->size.y*interface->depth,
-                                      interface->output->size.x*interface->breadth,
+                                      interface->output->size.x*interface->depth,
                                       GL_RGBA,
                                       GL_UNSIGNED_BYTE, 
-                                      map);
+                                      tex);
                 
                     x=interface->output->position.x-.5;
                     y=interface->output->position.y-.5;
@@ -719,7 +733,7 @@ int main(int argc, char **argv)
                     h=interface->output->size.y;
                 
                     glEnable(GL_TEXTURE_2D);
-                    glTexEnvf(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_DECAL);
+                    glTexEnvf(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_REPLACE);
                     glBindTexture(GL_TEXTURE_2D, tid);
                     glBegin(GL_QUADS);
                     glTexCoord2f(0.0, 0.0); glVertex3f(x,y,z);
@@ -740,7 +754,7 @@ int main(int argc, char **argv)
             int axis;
             static int show=1;
             
-            int synapse_op(D3 *ipos,D3 *opos,int dendrite,int synapse)
+            int synapse_op(D3 *ipos,D3 *opos,int dendrite,int synapse,DendriteMap *map)
             {
                 int active=interface->output->active[opos->vol];
                 int predict=interface->output->predicted[opos->vol];
