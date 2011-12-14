@@ -1,5 +1,12 @@
-int I=16; // input 2d dimension
+#define PROX_THRESH 0.5
+#define DIST_THRESH 0.5
 
+int cycles=0;
+#define TICKS 2
+#define TICK(t) ((cycles-(t))%TICKS)
+
+
+int I=16; // input 2d dimension
 int F=8;  // input->column fanout
 int D=4;  // node root dimension
 
@@ -29,16 +36,12 @@ static long long DMASK[D*D] = { 0xf<<0x0, 0xf<<0x1, 0xf<<0x2, 0xf<<0x3,
 #define SETNIB16(bits,val) ((bits)=(bits)&
 #define GETNIB16(bits,val) ((val)=(bits)&DMASK[],(bits)>>D
 
-typedef struct
-{
-    Coarse active;
-    Coarse predicting;
-    Coarse learning;
-} Cell;
 
 typedef struct
 {
-    Coarse active;
+    Bits cell_active[TICKS];
+    Bits cell_predicting[TICKS];
+
     Coarse potential;
     Coarse bias;
     Coarse input;
@@ -46,38 +49,53 @@ typedef struct
 
 typedef struct
 {
-    Bits active;
+    Bits column_active[TICKS];
+
     Column column [D][D] [D][D]; // node  (xy)(column(xy))
-    Cell cell     [D][D] [D][D][D]; // node(xy)(cell(xyz))
     Coarse synapse[D][D] [D][D][D] [D][D][D]; // permanence from node(xy)(cell(xyz),cell(xyz))
     unsigned short inputMap[I][I][F]; // input(xy)(fanout) is index into node(xy)(colum(xy))
-
 } Region;
 
 #define LOOP(r,v) for (v=0;v<D;v++)
+
+#define COLUMN(nx,ny,x,y) (region->column[nx][ny][x][y])
+#define SYNAPSE(nx,ny,sx,sy,sz,dx,dy,dz) (region->cell[nx][ny][sx][sy][sz][dx][dy][dz])
 
 
 void region_input(Region *region)
 {
     int x,y,fanout,bit;
     char c;
-
    
-    LOOP(D,x) LOOP(D,y)
-        BZERO(region->node[x][y].col_input);
+    LOOP(D,x) LOOP(D,y) BZERO(region->node[x][y].col_input);
    
     LOOP(I/8,x) LOOP(I,y) LOOP(F,fanout)
     {
         c=getc(stdin); // just bottom-up for now
-        LOOP(8,bit) (region->column+(region->inputMap[x+bit][y][fanout]))->input += c&1;
+        LOOP(8,bit)
+            (region->column+(region->inputMap[x+bit][y][fanout]))->input += (c>>bit)&1;
     }
 }
 
 void region_propagate(Region *region)
 {
-    // pick winning column
-    region->x;
-   
+    int nx,ny,x,y,z,ix,iy,iz;
+
+    // predicting?
+
+    LOOP(D,nx) LOOP(D,ny)
+        LOOP(D,x) LOOP(D,y)
+    {
+        LOOP(D,z)
+        {
+        LOOP(D,ix) LOOP(D,iy) LOOP(D,iz)
+            if (COLUMN(nx,ny,x,y).active[ * SYNAPSE(nx,ny,x,y,z,ix,iy,iz) > DIST_THRESH)
+                CELL(nx,ny,x,y,z).predicting++;
+
+                }
+        }
+       
+           
         // adjust synapses
 
         (region->column+activeColumn)->bias++;
@@ -91,8 +109,7 @@ void region_update(Region *region)
     LOOP(D,nx) LOOP(D,ny)
     {
         // pick winning column
-        region;
-       
+        LOOP(D,x) LOOP(D,y)
        
         // adjust synapses
         LOOP(D,x) LOOP(D,y) region->column[nx][ny][x][y].bias++;
@@ -138,5 +155,6 @@ void iterate()
     while (region_input(&region) &&
            region_propagate(&region) &&
            region_update(&region) &&
-           region_output(&region));
+           region_output(&region))
+        cycles++;
 }
