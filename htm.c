@@ -76,6 +76,7 @@ int show_predictions=1;
 int show_tex=1;
 int hide_input=0;
 int do_generative=1;
+int show_coords=0;
 
 
 /********************************************************************************************
@@ -585,16 +586,16 @@ int main(int argc, char **argv)
 {
     int gwidth=400,gheight=400;
     
-    float camera[] = { 6,-25,15 };
-    float center[] = { 0,0,8 };
-
+    float camera[] = { 0,0,0 };
+    float center[] = { 0,1,0 };
     float viewup[] = { 0,0,1 };
-    float zoom=.50;
 
     int mousestate[6]={0,0,0,0,0,0};
-    int mousepos[2]={0,0};
+    ivec mousepos={{},0,0,0};
+    fvec rot={{},0,60,0};
+    fvec trans={{},0,0,-30};
+    float zoom=.75;
 
-    
     Htm htm;
     RegionDesc rd[]= {
         //   size             pos         breadth        depth  ll
@@ -862,8 +863,13 @@ int main(int argc, char **argv)
 
             }
         }
-
-        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT);
+        
+        glMatrixMode(GL_MODELVIEW);
+        glLoadIdentity();
+        glTranslatef(trans.x,-trans.y,trans.z);
+        glRotatef(-rot.y, 1.0, 0.0, 0.0);
+        glRotatef(rot.x, 0.0, 0.0, 1.0);
+        glScalef(zoom,zoom,zoom);
 
         if (show_cells) ZLOOP(r,htm.regions) Region_display(&htm.region[r]);
         if (show_scores || show_suppression) ZLOOP(r,htm.regions) Scoring_display(&htm.region[r]);
@@ -871,11 +877,10 @@ int main(int argc, char **argv)
         glDepthMask(GL_FALSE);
         if (show_dendrites) ZLOOP(r,htm.regions) ZLOOP(i,INTERFACES) Interface_display(&htm.region[r].interface[i]);
         glDepthMask(GL_TRUE);
-
-        if (show_map)
-            DendriteMap_display();
+        if (show_map) DendriteMap_display();
 
         glutSwapBuffers();
+        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
     }
  
     void reshape(int w,int h)
@@ -910,36 +915,38 @@ int main(int argc, char **argv)
             case 't': show_tex=!show_tex; break;
             case 'h': hide_input=!hide_input; break;
             case 'g': do_generative=!do_generative; break;
+            case 'C': show_coords=!show_coords; break;
         }
     }
     
     void mouse(int button,int state,int x,int y)
     {
         mousestate[button]=!state;
-        mousepos[0]=x;
-        mousepos[1]=y;
+        mousepos.x=x;
+        mousepos.y=y;
         if (state==0) switch (button)
         {
-            case 3: glScalef(0.9,0.9,0.9); break;
-            case 4: glScalef(1.1,1.1,1.1); break;
+            case 3: zoom*=0.9; break;
+            case 4: zoom*=1.1; break;
         }
         glutPostRedisplay();
+        if (show_coords) printf("t(%f,%f,%f) r(%f,%f,%f) z(%f)\n",trans.x,trans.y,trans.z,rot.x,rot.y,rot.z,zoom);
     }
 
     void motion(int x,int y)
     {
         if (mousestate[1])
         {
-            glTranslatef((x-mousepos[0])*.1,0,0);
-            glTranslatef(0,0,-(y-mousepos[1])*.1);
+            trans.x+=(x-mousepos.x)*.1;
+            trans.y+=(y-mousepos.y)*.1;
         }
         else
         {
-            glRotatef((x-mousepos[0])*.1,0,0,1);
-            glRotatef((y-mousepos[1])*.1,1,0,0);
+            rot.x+=(x-mousepos.x)*.1;
+            rot.y-=(y-mousepos.y)*.1;
         }
-        mousepos[0]=x;
-        mousepos[1]=y;
+        mousepos.x=x;
+        mousepos.y=y;
         glutPostRedisplay();
     }
     
