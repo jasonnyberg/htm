@@ -21,7 +21,7 @@
 #define DENDRITE_CACHE 0x1000
 #define SYNAPSES 32
 
-#define DECAY 4
+#define DECAY 1
 #define NOISE_FACTOR 10.0
 #define IS_ACTIVE 0x80
 #define WAS_ACTIVE (IS_ACTIVE>>DECAY)
@@ -384,37 +384,29 @@ int Interface_suppress(Interface *interface)
 /********************************************************************************************/
 /********************************************************************************************/
 
-int Interface_score(Interface *interface,HTM_STATE state)
+int Interface_score(Interface *interface,HTM_STATE state,int mask)
 {
     int synapse_op(D3 *ipos,D3 *opos,int dendrite,int synapse,DendriteMap *map)
     {
         Dendrites *dens=&interface->dendrites[opos->vol];
         Dendrite *den=&dens->dendrite[dendrite];
         Synapse *syn=&den->synapse[synapse];
-        double sp;
-        
-        double stoch_perm(unsigned char p) { return DRAND(gseed)*NOISE_FACTOR; }
-    
+
+        int firing(int input) { return mask? input&mask : input>den->sensitivity+dens->bias; }
+
         if (synapse==0)
         {
             den->score=0;
             if (interface->input==interface->output) return 0; // don't let cell use itself as input
         }
         
-        sp=stoch_perm(syn->permanence);
-                      
         if (CLIP3D(ipos->v,interface->input->size.v))
-        {
-            if (syn->permanence+sp > PTHRESH)
+            if (syn->permanence+(DRAND(gseed)*NOISE_FACTOR) > PTHRESH)
             {
-                if (state&ACTIVE && interface->input->active[ipos->vol] > den->sensitivity+dens->bias)
-                    den->score+=1;
-                if (state&PREDICTED && interface->input->predicted[ipos->vol] > den->sensitivity+dens->bias)
-                    den->score+=1;
-                if (state&IMAGINED && interface->input->imagined[ipos->vol] > den->sensitivity+dens->bias)
-                    den->score+=1;
+                if (state&ACTIVE)    den->score+=firing(interface->input->active[ipos->vol]);
+                if (state&PREDICTED) den->score+=firing(interface->input->predicted[ipos->vol]);
+                if (state&IMAGINED)  den->score+=firing(interface->input->imagined[ipos->vol]);
             }
-        }
         
         if (synapse==interface->depth-1)
             if (den->score >= DTHRESH)
@@ -427,7 +419,7 @@ int Interface_score(Interface *interface,HTM_STATE state)
 }
 
 
-int Interface_adjust(Interface *interface,HTM_INPUT input)
+int Interface_adjust(Interface *interface,HTM_INPUT input,int mask)
 {
 #define INC(x,y) ((x)=MAX((x),(typeof(x)) ((x)+(y))))
 #define DEC(x,y) ((x)=MIN((x),(typeof(x)) ((x)-(y))))
@@ -438,24 +430,15 @@ int Interface_adjust(Interface *interface,HTM_INPUT input)
         Dendrite *den=&dens->dendrite[dendrite];
         Synapse *syn=&den->synapse[synapse];
         
+        int firing(int input) { return mask? input&mask : input>den->sensitivity+dens->bias; }
+        
         if (interface->input==interface->output && synapse==0) return 0; // don't let cell use itself as input
     
         if (CLIP3D(ipos->v,interface->input->size.v))
         {
-            int in_state=0,out_state=0;
-            
-            if (input==FEEDFWD  && interface->input->active[ipos->vol] > den->sensitivity+dens->bias)
-                in_state+=1;
-            if (input==INTRA    && interface->input->active[ipos->vol]<<DECAY) // step back in time
-                in_state+=1;
-            if (input==FEEDBACK && interface->input->active[ipos->vol]<<DECAY) // step back in time
-                in_state+=1;
-            
-            out_state=interface->output->active[opos->vol] & IS_ACTIVE;
-            
-            if (out_state)
+            if (interface->output->active[opos->vol] & IS_ACTIVE)
             {
-                if (in_state)
+                if (firing(interface->input->active[ipos->vol]))
                     INC(syn->permanence,STRONGER);
                 else
                     DEC(syn->permanence,WEAKER);
@@ -512,7 +495,7 @@ int Htm_update(Htm *htm)
         if (!region) return !0;
         if (region->interface[FEEDFWD].input)
         {
-            Interface_score(&region->interface[FEEDFWD],ACTIVE);
+            Interface_score(&region->interface[FEEDFWD],ACTIVE,0);
             Interface_suppress(&region->interface[INTRA]);
             ZLOOP(i,region->states.size.vol) if (region->states.score[i]>0) region->states.active[i]|=IS_ACTIVE;
         }
@@ -535,15 +518,15 @@ int Htm_update(Htm *htm)
     int adjust(Region *region)
     {
         if (!region) return !0;
-        Interface_adjust(&region->interface[FEEDFWD],FEEDFWD);
-        Interface_adjust(&region->interface[INTRA],INTRA);
-        Interface_adjust(&region->interface[FEEDBACK],FEEDBACK);
+        Interface_adjust(&region->interface[FEEDFWD],FEEDFWD,0);
+        Interface_adjust(&region->interface[INTRA],INTRA,IS_ACTIVE>>DECAY);
+        Interface_adjust(&region->interface[FEEDBACK],FEEDBACK,IS_ACTIVE>>DECAY);
     }
     
     int predict(Region *region)
     {
-        Interface_score(&region->interface[INTRA],ACTIVE);
-        Interface_score(&region->interface[FEEDBACK],ACTIVE);
+        Interface_score(&region->interface[INTRA],ACTIVE,IS_ACTIVE);
+        //Interface_score(&region->interface[FEEDBACK],ACTIVE,IS_ACTIVE);
         ZLOOP(i,region->states.size.vol) if (region->states.score[i]>0) region->states.predicted[i]|=IS_ACTIVE;
     }
     
@@ -556,9 +539,9 @@ int Htm_update(Htm *htm)
     
     int imagine2(Region *region)
     {
-        Interface_score(&region->interface[FEEDFWD],PREDICTED | IMAGINED);
-        Interface_score(&region->interface[INTRA],PREDICTED | IMAGINED);
-        Interface_score(&region->interface[FEEDBACK],PREDICTED | IMAGINED);
+        Interface_score(&region->interface[FEEDFWD], PREDICTED | IMAGINED,IS_ACTIVE);
+        Interface_score(&region->interface[INTRA],   PREDICTED | IMAGINED,IS_ACTIVE);
+        Interface_score(&region->interface[FEEDBACK],PREDICTED | IMAGINED,IS_ACTIVE);
         ZLOOP(i,region->states.size.vol) if (region->states.score[i]>0) region->states.imagined[i]|=IS_ACTIVE;
     }
 
