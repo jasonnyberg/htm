@@ -849,7 +849,7 @@ extern int htm_main(int argc, char **argv)
                 ZLOOP(s,SYNAPSES)
                 {
                     ZLOOP(axis,2) p.v[axis]+=map.offset[s].v[axis]; // x/y!
-                    p.z=0; //map.offset[s].z%4; // z!
+                    p.z=map.offset[s].z%4; // z!
                     glVertex3iv(p.v);
                 }
                 glEnd();
