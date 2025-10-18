@@ -30,7 +30,7 @@ This is a legitimate 2011 research project that explored Hierarchical Temporal M
 4. **Novel contributions**: Author added interesting variations:
    - Non-binary input via sensitivity thresholds
    - Afterimage decay effects
-   - "Imagining" state for chain-of-thought predictions
+   - "Imagining" state for train-of-thought predictions
 
 5. **Historical context**: In 2011, multiple AI approaches competed:
    - Traditional ML (SVMs, Random Forests)
