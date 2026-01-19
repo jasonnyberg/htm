@@ -967,7 +967,7 @@ extern int htm_main(int argc, char **argv)
     }
 
     glutInit(&argc, argv);
-    glutInitDisplayMode(GLUT_DEPTH | GLUT_DOUBLE | GLUT_ACCUM | GLUT_ALPHA | GLUT_RGBA | GLUT_STENCIL);
+    glutInitDisplayMode(GLUT_DEPTH | GLUT_DOUBLE | GLUT_ALPHA | GLUT_RGBA);
 
     glutInitWindowPosition(100,100);
     glutInitWindowSize(gwidth,gheight);
@@ -993,9 +993,9 @@ extern int htm_main(int argc, char **argv)
     glBlendFunc(GL_SRC_ALPHA,GL_ONE_MINUS_SRC_ALPHA); // transparency
     //glBlendFunc(GL_SRC_ALPHA_SATURATE,GL_ONE); // back-to-front compositing
 
-    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT);
+    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
     glutSwapBuffers();
-    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT);
+    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
     glutSwapBuffers();
 
     reshape(gwidth,gheight);
